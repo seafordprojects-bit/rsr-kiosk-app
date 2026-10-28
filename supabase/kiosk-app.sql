@@ -172,6 +172,18 @@ end $$;
 revoke all on function public.kiosk_app_list(text) from public;
 grant execute on function public.kiosk_app_list(text) to anon, authenticated;
 
+-- STEP 4b - RSR Admin dashboard: battery/charging banner. Read-only, no passcode (same as kiosk_health,
+-- which the dashboard already reads with the public key): only names, battery % and charging state.
+create or replace function public.kiosk_app_status()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'device_id', k.device_id, 'name', k.name, 'battery', k.battery, 'charging', k.charging,
+           'last_seen', k.last_seen, 'unplugged_since', k.unplugged_since) order by k.name), '[]'::jsonb)
+    from public.kiosk_app_devices k
+$$;
+revoke all on function public.kiosk_app_status() from public;
+grant execute on function public.kiosk_app_status() to anon, authenticated;
+
 -- STEP 5 - office page: send a command (admin passcode)
 create or replace function public.kiosk_app_command(p_passcode text, p_device text, p_cmd text, p_arg text default '')
 returns jsonb language plpgsql volatile security definer set search_path = public as $$

@@ -5,6 +5,7 @@ drop function if exists public.kiosk_app_tick();
 drop function if exists public.kiosk_app_dur(interval);
 drop function if exists public.kiosk_app_command(text, text, text, text);
 drop function if exists public.kiosk_app_list(text);
+drop function if exists public.kiosk_app_status();
 drop function if exists public.kiosk_app_ack(text, bigint, text);
 drop function if exists public.kiosk_app_beat(jsonb);
 drop table if exists public.kiosk_app_events;

@@ -98,10 +98,14 @@ ok((await q(`select sched_on is null and sched_off='22:30' ok from kiosk_app_dev
 // 7-day cleanup
 await q(`update kiosk_app_devices set last_seen=now()-interval '8 days' where device_id='app-t3'`);
 await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from kiosk_app_devices where device_id='app-t3'`))[0].n===0,'stale tablet removed after 7 days');
+// dashboard status RPC (no passcode, read-only)
+let ST=(await q(`select public.kiosk_app_status() r`))[0].r;
+ok(Array.isArray(ST) && ST.length>0 && 'battery' in ST[0] && 'charging' in ST[0] && !('cmd' in ST[0]) && !('page_url' in ST[0]),'status RPC: battery/charging only');
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
 ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c.query(`select public.kiosk_app_tick()`);}catch(e){tickDenied=true;} ok(tickDenied,'anon cannot run tick');
+let stOk=true; try{ await c.query(`select public.kiosk_app_status()`);}catch(e){stOk=false;} ok(stOk,'anon can read status');
 let beatOk=true; try{ await c.query(`select public.kiosk_app_beat('{"device_id":"app-t1"}')`);}catch(e){beatOk=false; console.log(e.message)} ok(beatOk,'anon can beat');
 await c.query(`reset role`);
 // rollback
