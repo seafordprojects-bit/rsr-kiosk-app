@@ -1,0 +1,97 @@
+# RSR Kiosk app: tablet setup (full lock)
+
+One time per tablet, about 20 minutes. You need: the tablet, its USB cable, and the laptop.
+
+## 0. Before you start (important)
+
+The setup needs a **factory reset**, which erases everything on the tablet, including punches that have
+not synced yet.
+
+1. Do it when no one needs to punch (for example Sunday, or after the evening punches).
+2. Make sure the tablet is **online** and the RSR Admin dashboard shows **no stuck/unsynced punches** for that yard.
+3. Keep the logbook ready in case setup takes longer.
+
+## 1. Get the app
+
+On the laptop open `https://github.com/seafordprojects-bit/rsr-kiosk-app/releases`, then download
+**rsr-kiosk.apk** from the newest build.
+
+## 2. Install adb on the laptop (once)
+
+1. Download **SDK Platform-Tools for Windows** from `https://developer.android.com/tools/releases/platform-tools`.
+2. Unzip it to `C:\platform-tools`.
+3. Copy `rsr-kiosk.apk` into `C:\platform-tools`.
+
+## 3. Reset the tablet
+
+1. Tablet: **Settings > General management > Reset > Factory data reset**.
+2. In the welcome setup: connect to the yard **Wi-Fi**.
+3. **Skip** the Google account and **skip** the Samsung account. No account must be added, otherwise step 5 fails.
+
+## 4. Turn on USB debugging
+
+1. **Settings > About tablet > Software information**. Tap **Build number** 7 times until it says
+   "Developer mode has been turned on".
+2. **Settings > Developer options > USB debugging**: ON.
+3. Connect the USB cable to the laptop. On the tablet tap **Allow** on the "Allow USB debugging?" pop-up
+   (tick "Always allow from this computer").
+
+## 5. Install and lock (on the laptop, PowerShell)
+
+```powershell
+cd C:\platform-tools
+.\adb devices
+.\adb install rsr-kiosk.apk
+.\adb shell dpm set-device-owner ph.rsr.kiosk/.AdminReceiver
+```
+
+Expected: `adb devices` lists one device, install says `Success`, and the last line says
+`Success: Device owner set to package ph.rsr.kiosk`.
+
+If it says *"there are already some accounts on the device"*, an account was added in step 3. Go to
+**Settings > Accounts and backup > Manage accounts**, remove every account, then run the last line again.
+
+## 6. First start
+
+1. Open **RSR Kiosk** on the tablet.
+2. Enter the tablet name (for example `Carmen kiosk`) and an **exit passcode** (6 to 10 digits). Keep it in a safe place.
+3. The kiosk page opens, locked. Allow nothing else; the camera is already allowed.
+4. Unplug the USB cable. Then turn USB debugging OFF: hidden settings (step 8) > **Open Wi-Fi / Android settings**
+   > back to main Settings > **Developer options > USB debugging OFF**. Press Home to return to the kiosk.
+
+## 7. Check (visual confirmation)
+
+- Home, Back and Recents buttons do nothing. The notification bar does not pull down.
+- Press the power button twice. The tablet goes back to the kiosk, no lock screen.
+- Punch with a test PIN. The photo is taken.
+- On your phone open **RSR Tablets** (`https://seafordprojects-bit.github.io/rsr-kiosk-app/tablets.html`),
+  enter the admin passcode, and see the tablet **Online** with its battery.
+
+## 8. Hidden settings on the tablet
+
+Tap the **top-right corner 5 times quickly** (within 3 seconds), then enter the exit passcode.
+
+| Button | What it does |
+|---|---|
+| Reload page / Full reload | Same as Fully's reload. Full reload clears the old cached kiosk version; punches are kept. |
+| Check for app update now | Downloads and installs the newest build. |
+| Open Wi-Fi / Android settings | Unlocks the tablet for **10 minutes**, then it locks again by itself (or on restart). |
+| Screen schedule | Screen ON / OFF times (default 05:30 to 22:30). At night a worker can still press the power button to wake it. |
+| Change exit passcode | |
+| Restart tablet | |
+| Remove full lock | Only before selling or replacing the tablet. |
+
+Forgot the exit passcode: on the RSR Tablets page press **Open settings** for that tablet. The tablet opens
+settings once, without the passcode, within about 1 minute.
+
+## 9. Updates
+
+- **Kiosk page changes (rsr-engineering):** nothing to do. The tablet shows the new page like before.
+- **App changes:** a new build appears in Releases by itself. Tablets install it at night, or press
+  **Update app** on the RSR Tablets page. No tapping on the tablet.
+
+## Signing key (keep safe)
+
+All builds are signed with one key. GitHub has it locked (secret `KEYSTORE_PASSWORD`). Keep the backup
+`rsr-kiosk-signing-key.zip` on the NAS / Google Drive. If the key is lost, tablets cannot update anymore
+and each must be reset and set up again.

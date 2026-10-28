@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+}
+
+// versionCode comes from the GitHub Actions run number, so every build on main is newer than the last.
+// The tablet compares this number with the latest GitHub Release ("build-<code>") to decide on updates.
+def ciBuild = (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as Integer
+
+android {
+    namespace 'ph.rsr.kiosk'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'ph.rsr.kiosk'
+        minSdk 26
+        targetSdk 34
+        versionCode ciBuild
+        versionName "1.0.${ciBuild}"
+    }
+
+    signingConfigs {
+        release {
+            // The keystore is decrypted by the workflow into app/rsr-kiosk.jks. The SAME key must sign every
+            // release, otherwise the tablet refuses the update (Android checks the signature).
+            def ks = file('rsr-kiosk.jks')
+            if (ks.exists()) {
+                storeFile ks
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias 'rsrkiosk'
+                keyPassword System.getenv('KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

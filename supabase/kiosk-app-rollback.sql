@@ -1,0 +1,11 @@
+-- kiosk-app-rollback.sql - removes everything kiosk-app.sql added. Touches nothing else.
+select current_database();
+do $$ begin perform cron.unschedule('kiosk-app-tick'); exception when others then null; end $$;
+drop function if exists public.kiosk_app_tick();
+drop function if exists public.kiosk_app_command(text, text, text, text);
+drop function if exists public.kiosk_app_list(text);
+drop function if exists public.kiosk_app_ack(text, bigint, text);
+drop function if exists public.kiosk_app_beat(jsonb);
+drop table if exists public.kiosk_app_events;
+drop table if exists public.kiosk_app_devices;
+drop sequence if exists public.kiosk_app_cmd_seq;

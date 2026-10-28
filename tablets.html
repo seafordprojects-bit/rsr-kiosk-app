@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>RSR Tablets</title>
+<style>
+  :root{--bg:#f3f5f8;--card:#fff;--ink:#14212e;--mute:#66768a;--line:#dde3ea;--navy:#0e2a47;--ok:#12805c;--bad:#c62828;--warn:#b26a00;--btn:#eef2f7}
+  @media (prefers-color-scheme:dark){:root{--bg:#0f151c;--card:#18212b;--ink:#e7edf4;--mute:#93a3b5;--line:#2a3643;--navy:#9cc3ec;--btn:#223040}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:16px;background:var(--card);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+  header h1{margin:0;font-size:20px;color:var(--navy);flex:1}
+  main{padding:16px;max-width:760px;margin:0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+  .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .name{font-size:19px;font-weight:700;flex:1}
+  .dot{width:12px;height:12px;border-radius:50%;display:inline-block}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:12px 0}
+  .stat{background:var(--bg);border-radius:10px;padding:8px 10px}
+  .stat b{display:block;font-size:12px;color:var(--mute);font-weight:600}
+  .btns{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+  button{font:inherit;border:1px solid var(--line);background:var(--btn);color:var(--ink);border-radius:10px;min-height:46px;padding:8px 10px;cursor:pointer}
+  button.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
+  @media (prefers-color-scheme:dark){button.primary{color:#0f151c}}
+  button.danger{color:var(--bad)}
+  button:disabled{opacity:.5}
+  input{font:inherit;padding:12px;border:1px solid var(--line);border-radius:10px;width:100%;background:var(--card);color:var(--ink)}
+  .mute{color:var(--mute);font-size:14px}
+  .msg{padding:10px 12px;border-radius:10px;margin-bottom:12px;display:none}
+  .msg.err{display:block;background:#fdecea;color:var(--bad)}
+  .msg.ok{display:block;background:#e7f6ef;color:var(--ok)}
+  ul.ev{margin:8px 0 0;padding-left:18px;color:var(--mute);font-size:14px}
+</style>
+</head>
+<body>
+<header><h1>RSR Tablets</h1><span class="mute" id="stamp"></span></header>
+<main>
+  <div id="msg" class="msg"></div>
+
+  <div class="card" id="login">
+    <p style="margin-top:0">Enter the 6-digit <b>admin passcode</b> (same as the kiosk admin).</p>
+    <input id="pc" type="password" inputmode="numeric" autocomplete="off" maxlength="10" placeholder="Admin passcode">
+    <div style="height:10px"></div>
+    <button class="primary" id="go" style="width:100%">Open</button>
+  </div>
+
+  <div id="list"></div>
+  <p class="mute" id="foot" style="display:none">Refreshes every 20 seconds. A command reaches the tablet within about 1 minute.</p>
+</main>
+<script>
+const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
+const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
+let passcode = '';          // kept in memory only, never saved
+let timer = null;
+
+async function rpc(fn, body) {
+  const r = await fetch(SB + '/rest/v1/rpc/' + fn, {
+    method: 'POST',
+    headers: { apikey: KEY, Authorization: 'Bearer ' + KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  const t = await r.text();
+  if (!r.ok) throw new Error(t || ('HTTP ' + r.status));
+  return t ? JSON.parse(t) : null;
+}
+
+function show(text, kind) {
+  const m = document.getElementById('msg');
+  m.textContent = text || '';
+  m.className = 'msg' + (text ? ' ' + (kind || 'ok') : '');
+}
+
+function ago(iso) {
+  if (!iso) return '-';
+  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 90) return s + ' s ago';
+  if (s < 5400) return Math.round(s / 60) + ' min ago';
+  if (s < 172800) return Math.round(s / 3600) + ' h ago';
+  return Math.round(s / 86400) + ' days ago';
+}
+function hhmm(iso) {
+  return iso ? new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+}
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function load() {
+  try {
+    const rows = await rpc('kiosk_app_list', { p_passcode: passcode });
+    if (rows && rows.error) {
+      passcode = ''; clearInterval(timer);
+      document.getElementById('login').style.display = '';
+      document.getElementById('list').innerHTML = '';
+      document.getElementById('foot').style.display = 'none';
+      show(rows.error === 'wrong passcode' ? 'Wrong passcode (after 10 wrong tries it locks for 15 minutes).' : rows.error, 'err');
+      return;
+    }
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('foot').style.display = '';
+    document.getElementById('stamp').textContent = 'Updated ' + new Date().toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' });
+    render(rows || []);
+  } catch (e) {
+    show('Cannot reach the server: ' + e.message, 'err');
+  }
+}
+
+function render(rows) {
+  const L = document.getElementById('list');
+  if (!rows.length) { L.innerHTML = '<div class="card">No tablet is running the RSR Kiosk app yet.</div>'; return; }
+  L.innerHTML = rows.map(t => {
+    const color = t.online ? 'var(--ok)' : 'var(--bad)';
+    const batt = t.battery == null ? '-' : t.battery + '%' + (t.charging ? ' (charging)' : ' (NOT charging)');
+    const battColor = (t.battery != null && t.battery <= 20 && !t.charging) || t.charging === false ? 'var(--warn)' : 'inherit';
+    const last = t.cmd ? esc(t.cmd) + ': ' + (t.pending ? 'waiting for tablet...' : esc(t.cmd_result || '-')) + ' <span class="mute">' + hhmm(t.cmd_at) + '</span>' : '-';
+    const sched = t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on';
+    const ev = (t.events || []).map(e => '<li>' + esc(e.event) + ' - ' + hhmm(e.at) + '</li>').join('');
+    const id = esc(t.device_id);
+    return `<div class="card">
+      <div class="row"><span class="dot" style="background:${color}"></span><span class="name">${esc(t.name || t.device_id)}</span>
+        <span class="mute">${t.online ? 'Online' : 'OFFLINE'} - ${ago(t.last_seen)}</span></div>
+      <div class="grid">
+        <div class="stat"><b>Battery</b><span style="color:${battColor}">${batt}</span></div>
+        <div class="stat"><b>Screen</b>${t.screen_on ? 'On' : 'Off'}</div>
+        <div class="stat"><b>Kiosk page</b>${t.page_ok === false ? '<span style="color:var(--bad)">Not loading</span>' : 'OK'}</div>
+        <div class="stat"><b>Lock</b>${t.device_owner ? 'Full lock' : '<span style="color:var(--warn)">Pinning only</span>'}${t.maintenance ? ' <span style="color:var(--warn)">(maintenance)</span>' : ''}</div>
+        <div class="stat"><b>Screen schedule</b>${sched}</div>
+        <div class="stat"><b>App build</b>${esc(t.app_version)}</div>
+      </div>
+      <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>
+      <div class="btns">
+        <button class="primary" onclick="send('${id}','reload')">Reload page</button>
+        <button onclick="send('${id}','hard_reload','','Full reload clears the old cached kiosk version (punches are kept). Continue?')">Full reload</button>
+        <button onclick="send('${id}','update')">Update app</button>
+        <button onclick="send('${id}','screen_on')">Screen on</button>
+        <button onclick="send('${id}','screen_off','','Turn the screen off now?')">Screen off</button>
+        <button onclick="askSchedule('${id}','${esc(t.sched_on || '05:30')}','${esc(t.sched_off || '22:30')}')">Set schedule</button>
+        <button onclick="send('${id}','open_settings','','Open the settings screen on the tablet (no passcode needed for 10 minutes)?')">Open settings</button>
+        <button class="danger" onclick="send('${id}','restart','','Restart the tablet now? Workers cannot punch for about 1 minute.')">Restart tablet</button>
+      </div>
+      ${ev ? '<ul class="ev">' + ev + '</ul>' : ''}
+    </div>`;
+  }).join('');
+}
+
+async function send(device, cmd, arg, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  try {
+    const r = await rpc('kiosk_app_command', { p_passcode: passcode, p_device: device, p_cmd: cmd, p_arg: arg || '' });
+    if (r && r.error) { show(r.error, 'err'); return; }
+    show('Sent "' + cmd + '". The tablet picks it up within about 1 minute.', 'ok');
+    load();
+  } catch (e) { show('Not sent: ' + e.message, 'err'); }
+}
+
+function askSchedule(device, on, off) {
+  const v = prompt('Screen ON-OFF time, e.g. 05:30-22:30\nType "off" to keep the screen always on.', on + '-' + off);
+  if (v == null) return;
+  send(device, 'schedule', v.trim());
+}
+
+document.getElementById('go').onclick = () => {
+  passcode = document.getElementById('pc').value.trim();
+  document.getElementById('pc').value = '';
+  if (!passcode) return;
+  show('');
+  load();
+  clearInterval(timer);
+  timer = setInterval(load, 20000);
+};
+document.getElementById('pc').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
+</script>
+</body>
+</html>

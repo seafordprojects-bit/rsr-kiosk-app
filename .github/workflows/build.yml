@@ -1,0 +1,73 @@
+name: Build RSR Kiosk APK
+
+# Every push to main that changes the app builds a signed APK and publishes it as the
+# newest GitHub Release ("build-<number>"). The tablets check that release and update themselves.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unlock the signing key
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::Missing secret KEYSTORE_PASSWORD (repo Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in app/rsr-kiosk.jks.enc -out app/rsr-kiosk.jks -pass env:KEYSTORE_PASSWORD
+
+      - name: Build signed APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: gradle :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Check signature
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | head -3
+          cp "$APK" rsr-kiosk.apk
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" rsr-kiosk.apk \
+            --title "RSR Kiosk build ${{ github.run_number }}" \
+            --notes "Automatic build from commit ${{ github.sha }}. Tablets install it by themselves (nightly, or press Update app on the Tablets page)." \
+            --latest \
+          || gh release upload "build-${{ github.run_number }}" rsr-kiosk.apk --clobber   # re-run of the same build
+
+      - name: Remove the unlocked key
+        if: always()
+        run: rm -f app/rsr-kiosk.jks

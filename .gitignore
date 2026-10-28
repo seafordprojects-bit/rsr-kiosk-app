@@ -1,0 +1,11 @@
+# never commit the unlocked signing key
+app/rsr-kiosk.jks
+*.jks
+!*.jks.enc
+build/
+app/build/
+.gradle/
+local.properties
+*.apk
+node_modules/
+supabase/.pgdata/
