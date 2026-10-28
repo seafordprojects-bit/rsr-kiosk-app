@@ -53,16 +53,31 @@ await beat({device_id:'app-abc123',charging:false,battery:15});
 await q(`select public.kiosk_app_tick()`); S=(await q(`select msg from sent order by id`)).map(x=>x.msg);
 ok(S.filter(m=>m.includes('battery LOW')).length===1,'low battery alert once');
 await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent where msg like '%battery LOW%'`))[0].n===1,'low battery not repeated');
-// unplugged 10+ min (work hours dependent) - force time window by checking logic
-await q(`update kiosk_app_devices set unplugged_since=now()-interval '15 minutes'`);
+// NOT CHARGING: alert after 5 min with battery %, reminder after 30 min (day) / 2 h (night)
+await q(`delete from sent`);
+await q(`update kiosk_app_devices set unplugged_since=now()-interval '3 minutes' where device_id='app-abc123'`);
+await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent where msg like '%NOT CHARGING for%'`))[0].n===0,'no not-charging alert before 5 min');
+await q(`update kiosk_app_devices set unplugged_since=now()-interval '75 minutes' where device_id='app-abc123'`);
+await q(`select public.kiosk_app_tick()`);
+let M=(await q(`select msg from sent where msg like '%NOT CHARGING for%'`)).map(x=>x.msg);
+ok(M.length===1 && M[0].includes('1 h 15 min') && M[0].includes('Battery 15%'),'not-charging alert shows time + battery %: '+M[0]);
+await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent where msg like '%NOT CHARGING for%'`))[0].n===1,'no repeat right away');
+await q(`update kiosk_app_devices set unplugged_alerted_at=now()-interval '31 minutes'`);
 await q(`select public.kiosk_app_tick()`);
 const hr = (await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h;
-const unp=(await q(`select count(*)::int n from sent where msg like '%UNPLUGGED%'`))[0].n;
-ok((hr>=6&&hr<22)? unp===1 : unp===0, 'unplugged alert respects 6AM-10PM (hour '+hr+')');
-await beat({device_id:'app-abc123',charging:true,battery:16});
+const rem=(await q(`select count(*)::int n from sent where msg like '%NOT CHARGING for%'`))[0].n;
+ok((hr>=6&&hr<22)? rem===2 : rem===1, 'reminder after 30 min in daytime, not at night (hour '+hr+')');
+await q(`update kiosk_app_devices set unplugged_alerted_at=now()-interval '121 minutes'`);
+await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent where msg like '%NOT CHARGING for%'`))[0].n===rem+1,'reminder after 2 h always');
+// battery steps 50/30/20/10, each once
+await q(`delete from sent`); await q(`update kiosk_app_devices set batt_step=100, low_batt_alerted=false where device_id='app-abc123'`);
+for (const b of [60,48,47,29,19,9,8]) { await beat({device_id:'app-abc123',charging:false,battery:b}); await q(`select public.kiosk_app_tick()`); }
+const steps=(await q(`select msg from sent where msg like '%battery%' order by id`)).map(x=>x.msg);
+ok(steps.length===4 && steps[0].includes('48%') && steps[1].includes('29%') && steps[2].includes('LOW 19%') && steps[3].includes('CRITICAL 9%'),'battery steps once each: '+JSON.stringify(steps));
+await beat({device_id:'app-abc123',charging:true,battery:9});
 await q(`select public.kiosk_app_tick()`);
-ok((await q(`select unplugged_since is null and not low_batt_alerted ok from kiosk_app_devices`))[0].ok,'charging resets flags');
-if ((hr>=6&&hr<22)) ok((await q(`select count(*)::int n from sent where msg like '%charger is back%'`))[0].n===1,'charger back notice');
+ok((await q(`select unplugged_since is null and not low_batt_alerted and batt_step=100 and not unplugged_alerted ok from kiosk_app_devices where device_id='app-abc123'`))[0].ok,'charging resets flags');
+ok((await q(`select count(*)::int n from sent where msg like '%charging again. Battery 9%'`))[0].n===1,'charging-again notice with battery %');
 // silent tablet skipped
 await q(`update kiosk_app_devices set last_seen=now()-interval '20 minutes', charging=false, battery=5, low_batt_alerted=false`);
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent`))[0].n===0,'silent tablet skipped');

@@ -9,8 +9,9 @@
 --      on the server with the existing admin_verify_passcode):
 --        kiosk_app_list, kiosk_app_command
 --    * kiosk_app_tick every 5 min: Telegram to the existing "RSR Kiosk Alerts" chat for
---        - low battery (20% or less, not charging)
---        - charger unplugged for 10+ minutes (6 AM - 10 PM)
+--        - NOT CHARGING after 5 min, with battery %; reminder every 30 min (2 h at night) until plugged in
+--        - battery dropping while not charging: 50%, 30%, 20% (LOW), 10% (CRITICAL)
+--        - charging again, with battery %
 --        - tablet restarted / app updated / maintenance opened / update failed
 --      It reuses kiosk_alert_send (kiosk-alerts.sql). The existing "tablet went silent" alert
 --      stays as it is, so there is no double offline alert.
@@ -57,6 +58,9 @@ create table if not exists public.kiosk_app_devices (
   cmd_done_at       timestamptz
 );
 revoke all on public.kiosk_app_devices from anon, authenticated;
+-- not-charging reminders + battery-drop steps (2026-10-28)
+alter table public.kiosk_app_devices add column if not exists unplugged_alerted_at timestamptz;
+alter table public.kiosk_app_devices add column if not exists batt_step integer not null default 100;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -197,6 +201,15 @@ end $$;
 revoke all on function public.kiosk_app_command(text, text, text, text) from public;
 grant execute on function public.kiosk_app_command(text, text, text, text) to anon, authenticated;
 
+-- STEP 6a - "1 h 25 min" style text for alerts
+create or replace function public.kiosk_app_dur(p interval)
+returns text language sql immutable as $$
+  select case when extract(epoch from p) >= 3600
+              then floor(extract(epoch from p)/3600)::int || ' h ' || (floor(extract(epoch from p)/60)::int % 60) || ' min'
+              else floor(extract(epoch from p)/60)::int || ' min' end
+$$;
+revoke all on function public.kiosk_app_dur(interval) from public, anon, authenticated;
+
 -- STEP 6 - Telegram watcher (every 5 min). Server-side only; not callable with the anon key.
 create or replace function public.kiosk_app_tick()
 returns void language plpgsql volatile security definer set search_path = public as $$
@@ -215,25 +228,42 @@ begin
     v_name := coalesce(nullif(r.name,''), r.device_id);
     continue when r.last_seen < now() - interval '10 minutes';   -- silent tablet: the existing alert handles it
 
-    -- low battery
-    if coalesce(r.battery,100) <= 20 and r.charging is false and not r.low_batt_alerted then
-      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery LOW (' || r.battery
-                                      || '%) and NOT charging. Please plug in the charger.');
-      update public.kiosk_app_devices set low_batt_alerted = true where device_id = r.device_id;
-    elsif r.low_batt_alerted and (r.charging is true or coalesce(r.battery,0) >= 40) then
-      update public.kiosk_app_devices set low_batt_alerted = false where device_id = r.device_id;
+    -- NOT CHARGING: first alert after 5 min, then a reminder with the current battery %
+    -- every 30 min (every 2 h at night, 10 PM - 6 AM) until the charger is back.
+    if r.unplugged_since is not null and r.unplugged_since < now() - interval '5 minutes'
+       and (r.unplugged_alerted_at is null
+            or r.unplugged_alerted_at < now() - case when v_work then interval '30 minutes' else interval '2 hours' end) then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is NOT CHARGING for '
+              || public.kiosk_app_dur(now() - r.unplugged_since) || '. Battery '
+              || coalesce(r.battery::text,'?') || '%. Please plug in the charger.');
+      update public.kiosk_app_devices set unplugged_alerted = true, unplugged_alerted_at = now()
+       where device_id = r.device_id;
+    elsif r.unplugged_since is null and r.unplugged_alerted then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is charging again. Battery '
+              || coalesce(r.battery::text,'?') || '%. OK.');
+      update public.kiosk_app_devices set unplugged_alerted = false, unplugged_alerted_at = null
+       where device_id = r.device_id;
     end if;
 
-    -- charger unplugged 10+ minutes during work hours
-    if r.unplugged_since is not null and r.unplugged_since < now() - interval '10 minutes'
-       and v_work and not r.unplugged_alerted then
-      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' charger UNPLUGGED for '
-              || floor(extract(epoch from now() - r.unplugged_since)/60) || ' min (battery '
-              || coalesce(r.battery::text,'?') || '%).');
-      update public.kiosk_app_devices set unplugged_alerted = true where device_id = r.device_id;
-    elsif r.unplugged_since is null and r.unplugged_alerted then
-      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' charger is back. OK.');
-      update public.kiosk_app_devices set unplugged_alerted = false where device_id = r.device_id;
+    -- BATTERY DROPPING while not charging: one message each time it crosses 50%, 30%, 20%, 10%
+    -- (sent even inside a reminder gap, so a fast drop is never missed).
+    if r.charging is false and r.battery is not null then
+      if r.battery <= 10 and r.batt_step > 10 then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery CRITICAL ' || r.battery
+                || '% - it will switch off soon. Plug in NOW.');
+        update public.kiosk_app_devices set batt_step = 10, low_batt_alerted = true where device_id = r.device_id;
+      elsif r.battery <= 20 and r.batt_step > 20 then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery LOW ' || r.battery || '% and NOT charging.');
+        update public.kiosk_app_devices set batt_step = 20, low_batt_alerted = true where device_id = r.device_id;
+      elsif r.battery <= 30 and r.batt_step > 30 then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery ' || r.battery || '% and NOT charging.');
+        update public.kiosk_app_devices set batt_step = 30 where device_id = r.device_id;
+      elsif r.battery <= 50 and r.batt_step > 50 then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery ' || r.battery || '% and NOT charging.');
+        update public.kiosk_app_devices set batt_step = 50 where device_id = r.device_id;
+      end if;
+    elsif r.charging is true and (r.batt_step < 100 or r.low_batt_alerted) then
+      update public.kiosk_app_devices set batt_step = 100, low_batt_alerted = false where device_id = r.device_id;
     end if;
   end loop;
 
