@@ -7,11 +7,13 @@ import android.content.Intent;
 /** Screen on/off alarm, and the maintenance-end alarm. */
 public class ScheduleReceiver extends BroadcastReceiver {
     static final String ACTION_MAINT_END = "ph.rsr.kiosk.MAINT_END";
+    static final String ACTION_REPORT_WAKE = "ph.rsr.kiosk.REPORT_WAKE";
 
     @Override
     public void onReceive(Context c, Intent i) {
         Core core = Core.get(c);
         if (ACTION_MAINT_END.equals(i.getAction())) core.maintenanceAlarm();
+        else if (ACTION_REPORT_WAKE.equals(i.getAction())) core.reportWake();
         else core.scheduleAlarm();
     }
 }

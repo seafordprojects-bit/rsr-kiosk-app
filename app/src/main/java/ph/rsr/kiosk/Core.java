@@ -36,6 +36,8 @@ final class Core {
         void applyScreenFlag(boolean keepOn);
         String pageUrl();
         boolean pageOk();
+        /** Ask the kiosk page to sync now (punch queues + its own heartbeat). Main thread. */
+        void nudgePage();
     }
 
     private final Context ctx;
@@ -78,10 +80,44 @@ final class Core {
         bg = new Handler(t.getLooper());
     }
 
+    // ---- wake before the roll-call reports ----------------------------------------------------
+
+    /** Next report wake time, as an exact alarm (allowed while idle). Safe to call any time. */
+    void scheduleReportAlarm() {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        Intent i = new Intent(ctx, ScheduleReceiver.class).setAction(ScheduleReceiver.ACTION_REPORT_WAKE);
+        PendingIntent pi = PendingIntent.getBroadcast(ctx, 9, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        long next = Long.MAX_VALUE;
+        for (String t : Config.REPORT_WAKE_TIMES) next = Math.min(next, nextAt(t));
+        if (next == Long.MAX_VALUE) return;
+        boolean exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
+        if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+    }
+
+    /** Alarm fired: wake the screen, keep the CPU up for 90 s, push waiting punches, send heartbeats. */
+    void reportWake() {
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            PowerManager.WakeLock cpu = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:report");
+            cpu.acquire(90_000);
+        } catch (Exception e) {
+            Log.w(TAG, "report wakelock", e);
+        }
+        wakeScreen();
+        main.postDelayed(() -> { Host h = host.get(); if (h != null) { if (!h.pageOk()) h.reloadPage(false); else h.nudgePage(); } }, 3000);
+        // a second push 30 s later, after Wi-Fi has had time to reconnect from sleep
+        main.postDelayed(() -> { Host h = host.get(); if (h != null) h.nudgePage(); }, 33_000);
+        bg.postDelayed(this::beat, 5000);
+        scheduleReportAlarm();
+    }
+
     void start() {
         bg.removeCallbacksAndMessages(null);
         bg.post(this::loop);
         scheduleNextAlarm();
+        scheduleReportAlarm();
     }
 
     void setHost(Host h) { host = new WeakReference<>(h); }

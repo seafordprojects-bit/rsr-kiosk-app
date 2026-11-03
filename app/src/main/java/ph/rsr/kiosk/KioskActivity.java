@@ -423,6 +423,17 @@ public class KioskActivity extends Activity implements Core.Host {
     }
 
     @Override
+    public void nudgePage() {
+        if (web == null || mainFrameError) return;
+        // Functions of the RSR kiosk page (kiosk/index.html). Each is guarded inside the page
+        // (already syncing / offline = it returns), and missing ones are skipped.
+        web.evaluateJavascript("(function(){try{if(typeof syncFlush==='function')syncFlush();}catch(e){}"
+                + "try{if(typeof flushOfflinePunches==='function')flushOfflinePunches();}catch(e){}"
+                + "setTimeout(function(){try{if(typeof sendHeartbeat==='function')sendHeartbeat();}catch(e){}},15000);"
+                + "return 1;})()", null);
+    }
+
+    @Override
     public boolean pageOk() {
         return !mainFrameError;
     }

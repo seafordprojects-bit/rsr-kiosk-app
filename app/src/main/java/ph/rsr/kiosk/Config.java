@@ -31,6 +31,12 @@ final class Config {
     /** Maintenance (kiosk unlocked to fix Wi-Fi etc.) ends by itself after this long. */
     static final long MAINTENANCE_MS = 10 * 60_000L;
 
+    /**
+     * Roll-call reports (server, Telegram) at 10:01 AM, 3:00 PM and 7:10 PM read the punches the tablet has
+     * already synced. The app wakes the tablet 8 and 2 minutes before each one and pushes waiting punches.
+     */
+    static final String[] REPORT_WAKE_TIMES = { "09:53", "09:59", "14:52", "14:58", "19:02", "19:08" };
+
     /** Default screen schedule (Manila time on the tablet). After the 10 PM OT cut-off. */
     static final String DEFAULT_ON = "05:30";
     static final String DEFAULT_OFF = "22:30";
