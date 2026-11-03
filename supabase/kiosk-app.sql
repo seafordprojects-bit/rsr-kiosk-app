@@ -91,6 +91,12 @@ alter table public.kiosk_app_devices add column if not exists drain_off_n       
 alter table public.kiosk_app_devices add column if not exists drain_anchor_at    timestamptz;
 alter table public.kiosk_app_devices add column if not exists drain_anchor_batt  integer;
 alter table public.kiosk_app_devices add column if not exists drain_anchor_screen boolean;
+-- Security + weak charger (2026-11-03 review)
+alter table public.kiosk_app_devices add column if not exists token             text;   -- secret given to the tablet on its first report
+alter table public.kiosk_app_devices add column if not exists token_confirmed   boolean not null default false;   -- the tablet sent it back once
+alter table public.kiosk_app_devices add column if not exists charge_state      text;   -- charging / full / discharging / not_charging
+alter table public.kiosk_app_devices add column if not exists weak_since        timestamptz;
+alter table public.kiosk_app_devices add column if not exists weak_alerted      boolean not null default false;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -115,26 +121,56 @@ declare
   v_out  jsonb := case when jsonb_typeof(p->'outage') = 'object' then p->'outage' end;
   v_otxt text;
   v_prev timestamptz;
+  v_tok  text;
+  v_new  text;
+  v_name text := regexp_replace(left(btrim(coalesce(p->>'name','')), 40), '[^[:alnum:] ._-]', '', 'g');
+  v_conf boolean;
+  v_cs   text := case when p->>'charge_state' in ('charging','full','discharging','not_charging') then p->>'charge_state' end;
   d      public.kiosk_app_devices%rowtype;
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
+  -- Only exact app messages go into the log (they end up in Telegram); anything else is dropped.
+  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3})$' then
+    v_ev := '';
+  end if;
+  -- TOKEN: the first report of a tablet gets a secret. Until the tablet has sent it back once
+  -- (confirmed), a report WITHOUT a secret is still accepted and the secret is sent again - so a lost
+  -- first reply can never lock the tablet out. After that, every report must carry it: someone who only
+  -- knows the public key and a tablet id cannot pretend to be that tablet.
+  select k.token, k.token_confirmed into v_tok, v_conf from public.kiosk_app_devices k where k.device_id = v_id;
+  if v_tok is not null then
+    if (p->>'token') = v_tok then
+      if not v_conf then update public.kiosk_app_devices k set token_confirmed = true where k.device_id = v_id; end if;
+    elsif not v_conf and coalesce(p->>'token', '') = '' then
+      v_new := v_tok;                       -- not confirmed yet: send the same secret again
+    else
+      return jsonb_build_object('error', 'token');
+    end if;
+  end if;
   -- spam guard: at most 20 tablets ever register
   if not exists (select 1 from public.kiosk_app_devices x where x.device_id = v_id)
      and (select count(*) from public.kiosk_app_devices) >= 20 then
     return '{}'::jsonb;
   end if;
 
-  insert into public.kiosk_app_devices as k (device_id) values (v_id)
-  on conflict (device_id) do nothing;
+  if v_tok is null then
+    v_new := gen_random_uuid()::text;
+    insert into public.kiosk_app_devices as k (device_id, token) values (v_id, v_new)
+    on conflict (device_id) do update set token = excluded.token where k.token is null;
+  end if;
   select k.last_seen into v_prev from public.kiosk_app_devices k where k.device_id = v_id;
 
   update public.kiosk_app_devices k set
-    name            = left(coalesce(nullif(btrim(p->>'name'),''), k.name), 60),
+    name            = coalesce(nullif(v_name, ''), k.name),
     kiosk_device_id = left(coalesce(nullif(btrim(p->>'kiosk_device_id'),''), k.kiosk_device_id), 80),
     model           = left(p->>'model', 120),
     app_version     = nullif(p->>'app_version','')::integer,
     battery         = nullif(p->>'battery','')::integer,
     charging        = v_chg,
+    charge_state    = v_cs,
+    -- plugged in but losing charge (weak charger / bad cable); 'not_charging' at 80%+ is Protect battery
+    weak_since      = case when v_chg is true and (v_cs = 'discharging' or (v_cs = 'not_charging' and nullif(p->>'battery','')::integer < 80))
+                           then coalesce(k.weak_since, now()) else null end,
     screen_on       = (p->>'screen_on')::boolean,
     device_owner    = (p->>'device_owner')::boolean,
     maintenance     = (p->>'maintenance')::boolean,
@@ -168,7 +204,7 @@ begin
       update public.kiosk_app_devices k set drain_anchor_at = now(), drain_anchor_batt = d.battery,
              drain_anchor_screen = d.screen_on where k.device_id = v_id;
     elsif d.screen_on is distinct from d.drain_anchor_screen or d.drain_anchor_batt - d.battery >= 5
-          or v_prev < now() - interval '15 minutes' then
+          or (d.drain_anchor_screen and v_prev < now() - interval '15 minutes') then
       -- a gap in reports while the screen was ON (tablet slept / no Wi-Fi) makes the screen-on figure
       -- unreliable: that measurement is dropped. A gap with the screen OFF is the normal night sleep.
       if now() - d.drain_anchor_at >= interval '20 minutes' and d.drain_anchor_batt - d.battery >= 2
@@ -212,25 +248,42 @@ begin
 
   if d.cmd_id is not null and d.cmd_id > coalesce(d.cmd_done_id, 0)
      and d.cmd_at > now() - interval '30 minutes' then   -- an old, never-picked-up command expires
-    return jsonb_build_object('cmd_id', d.cmd_id, 'cmd', d.cmd, 'arg', coalesce(d.cmd_arg,''));
+    return jsonb_build_object('cmd_id', d.cmd_id, 'cmd', d.cmd, 'arg', coalesce(d.cmd_arg,''))
+           || case when v_new is not null then jsonb_build_object('token', v_new) else '{}'::jsonb end;
   end if;
-  return '{}'::jsonb;
+  return case when v_new is not null then jsonb_build_object('token', v_new) else '{}'::jsonb end;
 end $$;
 revoke all on function public.kiosk_app_beat(jsonb) from public;
 grant execute on function public.kiosk_app_beat(jsonb) to anon, authenticated;
 
--- STEP 3 - the app confirms a command
-create or replace function public.kiosk_app_ack(p_device text, p_cmd_id bigint, p_result text)
+-- STEP 3 - the app confirms a command (with its secret)
+drop function if exists public.kiosk_app_ack(text, bigint, text);
+create or replace function public.kiosk_app_ack(p_device text, p_token text, p_cmd_id bigint, p_result text)
 returns void language plpgsql volatile security definer set search_path = public as $$
 begin
   update public.kiosk_app_devices k
      set cmd_done_id = greatest(coalesce(k.cmd_done_id,0), p_cmd_id),
-         cmd_result  = left(coalesce(p_result,''), 200),
+         cmd_result  = left(regexp_replace(coalesce(p_result,''), '[<>]', '', 'g'), 200),
          cmd_done_at = now()
-   where k.device_id = p_device and k.cmd_id = p_cmd_id;
+   where k.device_id = p_device and k.token = p_token and k.cmd_id = p_cmd_id;
 end $$;
-revoke all on function public.kiosk_app_ack(text, bigint, text) from public;
-grant execute on function public.kiosk_app_ack(text, bigint, text) to anon, authenticated;
+revoke all on function public.kiosk_app_ack(text, text, bigint, text) from public;
+grant execute on function public.kiosk_app_ack(text, text, bigint, text) to anon, authenticated;
+
+-- STEP 3b - office page: forget a tablet (admin passcode), e.g. after a factory reset or reinstall, so it
+-- can register again with a new secret. Its settings (generator hours) must then be set again.
+create or replace function public.kiosk_app_forget(p_passcode text, p_device text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  delete from public.kiosk_app_devices k where k.device_id = p_device;
+  if not found then return jsonb_build_object('error', 'tablet not found'); end if;
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_forget(text, text) from public;
+grant execute on function public.kiosk_app_forget(text, text) to anon, authenticated;
 
 -- STEP 4 - office page: list tablets (admin passcode)
 create or replace function public.kiosk_app_list(p_passcode text)
@@ -437,11 +490,13 @@ create or replace function public.kiosk_app_status()
 returns jsonb language sql stable security definer set search_path = public as $$
   select coalesce(jsonb_agg(x.j order by x.nm), '[]'::jsonb) from (
     select k.name as nm, jsonb_build_object(
-           'device_id', k.device_id, 'name', k.name, 'battery', k.battery, 'charging', k.charging,
+           'name', coalesce(nullif(k.name,''), 'Tablet'), 'battery', k.battery, 'charging', k.charging,
+           'weak_charger', k.weak_since is not null and k.weak_since < now() - interval '15 minutes',
            'last_seen', k.last_seen, 'unplugged_since', k.unplugged_since,
            'generator', k.power_windows is not null,
            'power_state', st.state,
-           'power_expected', st.state = 'on',
+           'power_expected', st.state = 'on' and public.kiosk_app_power_state(k.power_windows,
+               greatest(0, (extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila')))::int - 5)) = 'on',
            'power_back_at', public.kiosk_app_next_power(k.power_windows, now()),
            'may_run_out', case when k.power_windows is not null and k.charging is false and k.battery is not null
                                     and st.state in ('off', 'overtime')
@@ -490,7 +545,10 @@ begin
                     when v_on < v_off then v_min >= v_on + 15 and v_min < v_off
                     else v_min >= v_on + 15 or v_min < v_off end;
     if r.last_seen < now() - interval '10 minutes' then
+      -- From 9 PM the app turns the screen off when nobody uses it, and the tablet then sleeps:
+      -- its last report said screen_on=false, so that silence is on purpose, not an outage.
       if v_work and v_awake and r.last_seen > now() - interval '24 hours'
+         and not (r.screen_on is false and v_min >= 21*60)
          and (r.offline_alerted_at is null or r.offline_alerted_at < now() - interval '60 minutes') then
         v_why := case when r.charging is false and coalesce(r.battery,100) <= 15
                         then ' Last report: battery ' || r.battery || '% and NOT charging - the battery probably ran out.'
@@ -518,6 +576,17 @@ begin
               || ' Battery ' || coalesce(r.battery::text,'?') || '%.');
       -- keep offline_alerted_at: a tablet whose Wi-Fi keeps dropping gets at most one OFFLINE per hour
       update public.kiosk_app_devices set offline_first_at = null where device_id = r.device_id;
+    end if;
+
+    -- WEAK CHARGER: plugged in but the battery is not charging / still dropping for 15 min (bad charger,
+    -- loose cable, or the UPS/generator output is too weak). Once; clears when it charges again.
+    if r.weak_since is not null and r.weak_since < now() - interval '15 minutes' and not r.weak_alerted then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is PLUGGED IN but NOT taking charge for '
+              || public.kiosk_app_dur(now() - r.weak_since) || ' (battery ' || coalesce(r.battery::text,'?')
+              || '%). Check the charger, cable and the power source (UPS / generator).');
+      update public.kiosk_app_devices set weak_alerted = true where device_id = r.device_id;
+    elsif r.weak_since is null and r.weak_alerted then
+      update public.kiosk_app_devices set weak_alerted = false where device_id = r.device_id;
     end if;
 
     -- HOT: battery 45 C or more (sun, charging in a closed box). Once; clears below 40 C.
@@ -617,8 +686,9 @@ begin
 
   -- keep the log small (free tier)
   delete from public.kiosk_app_events where at < now() - interval '60 days';
-  -- free the 20-tablet cap from ids that stopped reporting a week ago (a real tablet re-registers on its next beat)
-  delete from public.kiosk_app_devices where last_seen < now() - interval '7 days';
+  -- free the 20-tablet cap from UNNAMED ids that never finished setup and stopped a week ago. Named tablets
+  -- (Carmen, Mandaue) are never deleted here, so a long shutdown keeps their generator hours and history.
+  delete from public.kiosk_app_devices where coalesce(name, '') = '' and last_seen < now() - interval '7 days';
 end $$;
 revoke all on function public.kiosk_app_tick() from public, anon, authenticated;
 

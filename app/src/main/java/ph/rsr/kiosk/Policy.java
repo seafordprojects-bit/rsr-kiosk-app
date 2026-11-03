@@ -54,8 +54,8 @@ final class Policy {
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         run("perm mic", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.RECORD_AUDIO,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
-        // System updates only at night (11 PM - 4 AM) so Samsung never restarts the tablet during work.
-        run("updates", () -> d.setSystemUpdatePolicy(a, SystemUpdatePolicy.createWindowedInstallPolicy(23 * 60, 4 * 60)));
+        // System updates only 00:30 - 04:30 so Samsung never restarts the tablet during work or overtime.
+        run("updates", () -> d.setSystemUpdatePolicy(a, SystemUpdatePolicy.createWindowedInstallPolicy(30, 4 * 60 + 30)));
     }
 
     /** Maintenance: let the office use the tablet normally for a while (Wi-Fi, Settings). */

@@ -38,6 +38,8 @@ final class Core {
         boolean pageOk();
         /** Ask the kiosk page to sync now (punch queues + its own heartbeat). Main thread. */
         void nudgePage();
+        /** Is a worker in the middle of a punch (employee selected / dialog open)? Main thread; answers async. */
+        void pageBusy(java.util.function.Consumer<Boolean> answer);
     }
 
     private final Context ctx;
@@ -53,17 +55,59 @@ final class Core {
 
     void touched() { lastTouch = android.os.SystemClock.elapsedRealtime(); }
 
-    /**
-     * Wait (on the background thread) until nobody has touched the screen for 20 s, at most 3 minutes.
-     * Then wait 10 s more so the page has written its last punch to storage before the app stops.
-     */
-    private void waitForQuiet() {
-        long start = android.os.SystemClock.elapsedRealtime();
-        while (android.os.SystemClock.elapsedRealtime() - lastTouch < 20_000
-                && android.os.SystemClock.elapsedRealtime() - start < 180_000) {
-            try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+    // ---- punch safety --------------------------------------------------------------------------
+    // Owner rule: never block, delay or lose a punch. Anything that stops or reloads the kiosk page
+    // (reload, restart, app update, screen off) first checks that nobody is using the kiosk.
+
+    private long idleMs() { return android.os.SystemClock.elapsedRealtime() - lastTouch; }
+
+    /** Now inside a punch rush (Config.RUSH)? */
+    static boolean inRush() {
+        int now = nowMin();
+        for (String[] r : Config.RUSH) if (now >= minutes(r[0]) && now < minutes(r[1])) return true;
+        return false;
+    }
+
+    static int nowMin() {
+        Calendar c = Calendar.getInstance();
+        return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
+    }
+
+    static boolean between(int now, String from, String to) {
+        int a = minutes(from), b = minutes(to);
+        return a <= b ? (now >= a && now < b) : (now >= a || now < b);
+    }
+
+    /** Asks the page (background thread; waits up to 3 s). No page = not busy; no answer = busy (safe side).
+     *  Must never run on the main thread (the answer comes on the main thread): there it says busy. */
+    private boolean pageBusyNow() {
+        if (Looper.myLooper() == Looper.getMainLooper()) return true;
+        Host h = host.get();
+        if (h == null || !h.pageOk()) return false;
+        java.util.concurrent.CountDownLatch l = new java.util.concurrent.CountDownLatch(1);
+        final boolean[] busy = {true};
+        main.post(() -> {
+            Host hh = host.get();
+            if (hh == null) { l.countDown(); return; }
+            hh.pageBusy(b -> { busy[0] = Boolean.TRUE.equals(b); l.countDown(); });
+        });
+        try { l.await(3, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+        return busy[0];
+    }
+
+    /** Safe to interrupt the kiosk right now: no touch for idleSec, nobody mid-punch. */
+    private boolean safeNow(int idleSec) {
+        return idleMs() >= idleSec * 1000L && !pageBusyNow();
+    }
+
+    /** Background thread: wait until safe (checked every 5 s), at most maxSec. */
+    private boolean waitUntilSafe(int idleSec, int maxSec) {
+        long end = android.os.SystemClock.elapsedRealtime() + maxSec * 1000L;
+        while (true) {
+            if (safeNow(idleSec)) return true;
+            if (android.os.SystemClock.elapsedRealtime() > end) return false;
+            try { Thread.sleep(5000); } catch (InterruptedException e) { return false; }
         }
-        try { Thread.sleep(10_000); } catch (InterruptedException ignored) { }
     }
 
     static synchronized Core get(Context c) {
@@ -118,6 +162,25 @@ final class Core {
         bg.post(this::loop);
         scheduleNextAlarm();
         scheduleReportAlarm();
+        scheduleUpdateAlarm();
+    }
+
+    /** 01:00 every night: wake the processor for the update check (the tablet sleeps at night). */
+    void scheduleUpdateAlarm() {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        Intent i = new Intent(ctx, ScheduleReceiver.class).setAction(ScheduleReceiver.ACTION_UPDATE);
+        PendingIntent pi = PendingIntent.getBroadcast(ctx, 10, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, nextAt("01:00"), pi);
+    }
+
+    void updateAlarm() {
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:update").acquire(5 * 60_000L);
+        } catch (Exception ignored) { }
+        bg.postDelayed(this::nightlyUpdateCheck, 20_000);   // give Wi-Fi time to wake
+        scheduleUpdateAlarm();
     }
 
     void setHost(Host h) { host = new WeakReference<>(h); }
@@ -149,6 +212,7 @@ final class Core {
         try {
             JSONObject p = new JSONObject();
             p.put("device_id", prefs.deviceId());
+            p.put("token", prefs.token());
             p.put("name", prefs.name());
             p.put("kiosk_device_id", prefs.pageDeviceId());
             p.put("app_version", Updater.currentVersion(ctx));
@@ -157,7 +221,13 @@ final class Core {
                 int lvl = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
                 int plug = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
                 if (lvl >= 0 && sc > 0) p.put("battery", Math.round(lvl * 100f / sc));
-                p.put("charging", plug != 0);
+                p.put("charging", plug != 0);   // plugged in
+                // what the battery is really doing: a weak charger can be plugged in and still lose charge
+                int st = b.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+                p.put("charge_state", st == BatteryManager.BATTERY_STATUS_CHARGING ? "charging"
+                        : st == BatteryManager.BATTERY_STATUS_FULL ? "full"
+                        : st == BatteryManager.BATTERY_STATUS_DISCHARGING ? "discharging"
+                        : st == BatteryManager.BATTERY_STATUS_NOT_CHARGING ? "not_charging" : "unknown");
                 int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);   // tenths of a degree C
                 if (temp != Integer.MIN_VALUE && temp > -200 && temp < 1000) p.put("battery_temp", temp / 10.0);
             }
@@ -189,9 +259,15 @@ final class Core {
             }
             net.beatOk();
             if (ev != null && ev.equals(pendingEvent)) pendingEvent = null;
-            prefs.setLastBeatStatus("ok " + android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis()));
 
             JSONObject r = resp.trim().startsWith("{") ? new JSONObject(resp) : new JSONObject();
+            if ("token".equals(r.optString("error"))) {
+                prefs.setLastBeatStatus("REJECTED by server - press Forget tablet on the Tablets page");
+                return;
+            }
+            prefs.setLastBeatStatus("ok " + android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis()));
+            String tok = r.optString("token", "");
+            if (tok.matches("[0-9a-f-]{36}") && !tok.equals(prefs.token())) prefs.setToken(tok);
             long cmdId = r.optLong("cmd_id", 0);
             String cmd = r.optString("cmd", "");
             if (cmdId > prefs.lastCmdDone() && !cmd.isEmpty()) {
@@ -207,7 +283,8 @@ final class Core {
 
     private void ack(long id, String result) {
         try {
-            JSONObject b = new JSONObject().put("p_device", prefs.deviceId()).put("p_cmd_id", id).put("p_result", result);
+            JSONObject b = new JSONObject().put("p_device", prefs.deviceId()).put("p_token", prefs.token())
+                    .put("p_cmd_id", id).put("p_result", result);
             Net.rpc("kiosk_app_ack", b.toString());
         } catch (Exception e) {
             Log.w(TAG, "ack", e);
@@ -218,30 +295,37 @@ final class Core {
         Log.i(TAG, "command " + cmd + " " + arg);
         switch (cmd) {
             case "reload":
-                main.post(() -> { Host h = host.get(); if (h != null) h.reloadPage(false); });
+            case "hard_reload": {
+                // A page that is not loading cannot be punched on anyway: reload at once.
+                Host h0 = host.get();
+                boolean broken = h0 != null && !h0.pageOk();
+                if (!broken && inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (!broken && !waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
+                final boolean hard = cmd.equals("hard_reload");
+                main.post(() -> { Host h = host.get(); if (h != null) h.reloadPage(hard); });
                 ack(id, "done");
                 break;
-            case "hard_reload":
-                main.post(() -> { Host h = host.get(); if (h != null) h.reloadPage(true); });
-                ack(id, "done");
-                break;
+            }
             case "restart":
                 if (!Policy.isOwner(ctx)) { ack(id, "failed: not device owner"); break; }
-                ack(id, "restarting (waits for no punching)");
-                waitForQuiet();
+                if (inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (!waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
+                ack(id, "restarting");
                 Policy.reboot(ctx);
                 break;
             case "update":
-                waitForQuiet();
-                ack(id, Updater.checkAndInstall(ctx));
+                if (inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (!waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
+                ack(id, Updater.checkAndInstall(ctx, () -> !inRush() && safeNow(30)));
                 break;
             case "screen_on":
                 wakeScreen();
                 ack(id, "done");
                 break;
             case "screen_off":
-                main.post(() -> { Host h = host.get(); if (h != null) h.applyScreenFlag(false); });
-                main.postDelayed(() -> Policy.screenOffNow(ctx), 500);
+                if (inRush()) { ack(id, "refused: punch rush time"); break; }
+                if (!waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min"); break; }
+                screenOff("office");
                 ack(id, "done");
                 break;
             case "open_settings":
@@ -269,7 +353,7 @@ final class Core {
         }
         lastOnHours = null;   // re-apply right away
         scheduleNextAlarm();
-        checkScheduleTransition();
+        bg.post(this::checkScheduleTransition);   // background thread: it may ask the page
         return "schedule " + (prefs.scheduleEnabled() ? prefs.onTime() + "-" + prefs.offTime() : "off");
     }
 
@@ -285,21 +369,54 @@ final class Core {
         return on < off ? (now >= on && now < off) : (now >= on || now < off);
     }
 
-    /** Called by the alarm and by the 60 s loop. Acts only when on-hours flips, never repeatedly. */
-    synchronized void checkScheduleTransition() {
-        boolean onHours = isOnHours();
-        if (lastOnHours != null && lastOnHours == onHours) return;
-        boolean first = lastOnHours == null;
-        lastOnHours = onHours;
-        main.post(() -> { Host h = host.get(); if (h != null) h.applyScreenFlag(onHours); });
-        if (onHours) {
-            if (!first) wakeScreen();
-        } else if (!first) {
-            // Scheduled screen off. A worker can still wake it with the power button for late OT.
-            main.postDelayed(() -> Policy.screenOffNow(ctx), 1000);
-            // Good quiet moment for an update check.
-            bg.postDelayed(this::nightlyUpdateCheck, 60_000);
+    /**
+     * Screen rules, checked every minute while the tablet is awake (and by the ON/OFF alarms):
+     *  - ON time: wake the screen.
+     *  - Inside the schedule before EVENING_IDLE_FROM (9 PM): the screen stays on (the page blacks out
+     *    by itself and the app lowers the backlight).
+     *  - Inside the schedule from 9 PM: off after 15 min without a touch (overtime may end 9, 10 or 12).
+     *  - Outside the schedule: a screen woken by the power button goes off 2 min after the last touch.
+     *  Never while a worker is mid-punch.
+     */
+    void checkScheduleTransition() {
+        boolean onHours, changed;
+        synchronized (this) {
+            onHours = isOnHours();
+            changed = lastOnHours != null && lastOnHours != onHours;
+            lastOnHours = onHours;
         }
+        if (changed && onHours) { wakeScreen(); return; }
+        PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+        if (pm == null || !pm.isInteractive()) return;
+        int limitMin;
+        if (!onHours) limitMin = Config.NIGHT_IDLE_MIN;
+        else if (inEvening()) limitMin = Config.EVENING_IDLE_MIN;
+        else return;
+        if (idleMs() >= limitMin * 60_000L && !pageBusyNow()) {
+            synchronized (this) { if (isOnHours() != onHours) return; }   // an ON alarm came in meanwhile
+            screenOff(onHours ? "evening idle" : "after hours");
+        }
+    }
+
+    /** From 9 PM until the OFF time (OFF may be after midnight). Never during the day. */
+    private boolean inEvening() {
+        if (!prefs.scheduleEnabled()) return false;
+        int now = nowMin(), from = minutes(Config.EVENING_IDLE_FROM), on = minutes(prefs.onTime()), off = minutes(prefs.offTime());
+        if (from < 0 || on < 0 || off < 0) return false;
+        if (off > on) return now >= from && now < off;   // OFF the same day (e.g. 22:30)
+        return now >= from || now < off;                 // OFF after midnight (e.g. 00:15)
+    }
+
+    /** Turn the screen off now and tell the office it was on purpose (not a dead or offline tablet). */
+    private void screenOff(String why) {
+        Log.i(TAG, "screen off: " + why);
+        try {   // keep the processor awake until the screen_on=false report has gone out
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:screenoff").acquire(20_000L);
+        } catch (Exception ignored) { }
+        bg.post(this::beat);                                   // last report says screen_on=true...
+        main.postDelayed(() -> Policy.screenOffNow(ctx), 1500);
+        bg.postDelayed(this::beat, 4000);                      // ...this one says screen_on=false
     }
 
     void scheduleNextAlarm() {
@@ -311,9 +428,10 @@ final class Core {
         if (!prefs.scheduleEnabled()) return;
         long next = Math.min(nextAt(prefs.onTime()), nextAt(prefs.offTime()));
         if (next <= 0) return;
-        // Inexact-but-idle-safe: may fire a few minutes late in deep sleep. The ON time defaults to 5:30,
-        // well before the 8:00 time-in, and the 60 s loop also catches the change while awake.
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+        // Exact, so the screen is on before the first 7:00 punch even after a night of deep sleep.
+        boolean exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
+        if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
     }
 
     private static long nextAt(String hhmm) {
@@ -386,13 +504,20 @@ final class Core {
         bg.post(this::checkMaintenanceExpiry);
     }
 
-    /** Alarm path for the screen schedule: alarms only fire at ON/OFF times, so act on the current state. */
+    /** Alarm path for the screen schedule (ON / OFF time). The same punch-safe rules as the minute check. */
     void scheduleAlarm() {
         boolean onHours = isOnHours();
-        synchronized (this) { lastOnHours = onHours; }
-        main.post(() -> { Host h = host.get(); if (h != null) h.applyScreenFlag(onHours); });
-        if (onHours) wakeScreen();
-        else main.postDelayed(() -> Policy.screenOffNow(ctx), 1000);
+        if (onHours) {
+            synchronized (this) { lastOnHours = true; }
+            wakeScreen();
+        } else {
+            try {
+                PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+                pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:sched").acquire(4 * 60_000L);
+            } catch (Exception ignored) { }
+            // keep checking each minute for a few minutes, so a worker mid-punch at OFF time is not cut off
+            for (int k = 0; k < 4; k++) bg.postDelayed(this::checkScheduleTransition, k * 60_000L);
+        }
         scheduleNextAlarm();
     }
 
@@ -410,14 +535,16 @@ final class Core {
         }
     }
 
+    /** Once a day, only 00:30 - 04:30 and only when nobody is using the kiosk (never mid-punch). */
     private void nightlyUpdateCheck() {
-        Calendar c = Calendar.getInstance();
-        int h = c.get(Calendar.HOUR_OF_DAY);
-        boolean quiet = h >= 23 || h < 4 || !isOnHours();
-        if (!quiet) return;
+        if (!between(nowMin(), Config.UPDATE_FROM, Config.UPDATE_TO)) return;
         if (System.currentTimeMillis() - prefs.lastUpdateCheck() < 20 * 3600_000L) return;
-        prefs.setLastUpdateCheck(System.currentTimeMillis());
-        String r = Updater.checkAndInstall(ctx);
+        if (!safeNow(10 * 60)) return;
+        String r = Updater.checkAndInstall(ctx, () -> between(nowMin(), Config.UPDATE_FROM, Config.UPDATE_TO) && safeNow(10 * 60));
+        // only a real outcome counts as tonight's check; postponed / no internet tries again later tonight
+        if (r.startsWith("installing") || r.startsWith("up to date") || r.startsWith("no release")) {
+            prefs.setLastUpdateCheck(System.currentTimeMillis());
+        }
         if (r.startsWith("installing")) reportEvent(r);
     }
 

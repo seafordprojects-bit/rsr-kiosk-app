@@ -22,7 +22,15 @@ create function public.admin_verify_passcode(p_input text) returns boolean langu
 const sql = fs.readFileSync('./kiosk-app.sql','utf8');
 await c.query(sql); await c.query(sql); ok(true,'migration runs twice (idempotent)');
 ok((await q(`select count(*)::int n from cron.job where jobname='kiosk-app-tick'`))[0].n===1,'one cron job');
-const beat = async p => (await q(`select public.kiosk_app_beat($1::jsonb) r`,[JSON.stringify(p)]))[0].r;
+const TOK = {};   // the secret each test tablet got on its first report
+const beat = async p => {
+  const body = Object.assign({}, p);
+  if (TOK[p.device_id] && !('token' in p)) body.token = TOK[p.device_id];
+  const r = (await q(`select public.kiosk_app_beat($1::jsonb) r`,[JSON.stringify(body)]))[0].r;
+  if (r && r.token) TOK[p.device_id] = r.token;
+  if (r) delete r.token;
+  return r;
+};
 ok(JSON.stringify(await beat({device_id:'x; drop'}))==='{}','bad id ignored');
 let r = await beat({device_id:'app-abc123',name:'Carmen kiosk',battery:80,charging:true,app_version:5,screen_on:true,event:'tablet restarted'});
 ok(JSON.stringify(r)==='{}','first beat no command');
@@ -36,7 +44,9 @@ r = (await q(`select public.kiosk_app_command('123456','app-abc123','format_disk
 r = (await q(`select public.kiosk_app_command('123456','app-zzz','reload','') r`))[0].r; ok(r.error==='tablet not found','missing tablet');
 r = (await q(`select public.kiosk_app_command('123456','app-abc123','restart','') r`))[0].r; ok(r.ok===true,'command queued');
 r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(r.cmd==='restart' && r.cmd_id>0,'beat returns command');
-await q(`select public.kiosk_app_ack('app-abc123',$1,'restarting')`,[r.cmd_id]);
+await q(`select public.kiosk_app_ack('app-abc123','wrong-token',$1,'fake')`,[r.cmd_id]);
+ok(JSON.stringify(await beat({device_id:'app-abc123',charging:true,battery:80})).includes('restart'),'ack with wrong token ignored');
+await q(`select public.kiosk_app_ack('app-abc123',$1,$2,'restarting')`,[TOK['app-abc123'],r.cmd_id]);
 r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(JSON.stringify(r)==='{}','after ack no command');
 // stale command expires
 await q(`select public.kiosk_app_command('123456','app-abc123','reload','')`); await q(`update kiosk_app_devices set cmd_at=now()-interval '31 minutes'`);
@@ -88,7 +98,7 @@ ok((await q(`select count(*)::int n from kiosk_app_devices`))[0].n===20,'max 20 
 await q(`delete from kiosk_app_events`);
 for (let i=0;i<5;i++) await beat({device_id:'app-abc123',charging:true,battery:80,event:'tablet restarted'});
 ok((await q(`select count(*)::int n from kiosk_app_events`))[0].n===1,'duplicate events dropped');
-for (let i=0;i<30;i++) await beat({device_id:'app-abc123',charging:true,battery:80,event:'x'+i});
+for (let i=0;i<30;i++) await beat({device_id:'app-abc123',charging:true,battery:80,event:'updated to build '+(100+i)});
 ok((await q(`select count(*)::int n from kiosk_app_events`))[0].n===20,'max 20 events per hour');
 await q(`delete from sent`); await q(`update kiosk_app_events set notified=false, event='tablet restarted '||id`);
 await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from sent where msg like '%tablet restarted%'`))[0].n===5,'max 5 Telegram event messages per tick');
@@ -100,7 +110,14 @@ await q(`update kiosk_app_devices set last_seen=now()-interval '8 days' where de
 await q(`select public.kiosk_app_tick()`); ok((await q(`select count(*)::int n from kiosk_app_devices where device_id='app-t3'`))[0].n===0,'stale tablet removed after 7 days');
 // dashboard status RPC (no passcode, read-only)
 let ST=(await q(`select public.kiosk_app_status() r`))[0].r;
-ok(Array.isArray(ST) && ST.length>0 && 'battery' in ST[0] && 'charging' in ST[0] && !('cmd' in ST[0]) && !('page_url' in ST[0]),'status RPC: battery/charging only');
+ok(Array.isArray(ST) && ST.length>0 && 'battery' in ST[0] && 'charging' in ST[0] && !('cmd' in ST[0]) && !('page_url' in ST[0]) && !('device_id' in ST[0]),'status RPC: battery/charging only, no tablet ids');
+// ---- security ----
+const fake = (await q(`select public.kiosk_app_beat('{"device_id":"app-abc123","charging":true,"battery":100,"name":"Hacked"}') r`))[0].r;
+ok(fake.error==='token' && (await q(`select name from kiosk_app_devices where device_id='app-abc123'`))[0].name==='Carmen kiosk','report without the secret is ignored');
+await beat({device_id:'app-abc123',name:'Carmen <b>kiosk</b>',event:'hello <script>'});
+ok((await q(`select name from kiosk_app_devices where device_id='app-abc123'`))[0].name==='Carmen bkioskb','name: only letters, digits, space . _ -');
+ok((await q(`select count(*)::int n from kiosk_app_events where event like '%script%' or event like 'hello%'`))[0].n===0,'unknown event text dropped');
+await beat({device_id:'app-abc123',name:'Carmen kiosk'});
 // ---- Wi-Fi / offline / heat (2026-11-03) ----
 const MH = (await q(`select extract(hour from now() at time zone 'Asia/Manila')::int*60 + extract(minute from now() at time zone 'Asia/Manila')::int m`))[0].m;
 const inWork = MH >= 360 && MH < 1320;
@@ -176,7 +193,7 @@ ok(L.some(x=>'wifi_signal' in x && 'battery_temp' in x && 'last_outage' in x),'l
 if (MH > 90 && MH < 1290) {
   await q(`delete from kiosk_app_devices where device_id like 'app-t%'`);   // free the 20-tablet cap used earlier
   await q(`delete from sent`);
-  await beat({device_id:'app-g1',name:'Carmen kiosk',charging:true,battery:80,sched_on:'06:45',sched_off:'22:30'});
+  await beat({device_id:'app-g1',name:'Carmen kiosk G',charging:true,battery:80,sched_on:'06:45',sched_off:'22:30'});
   let R = (await q(`select public.kiosk_app_set_power('000000','app-g1','08:00-11:30') r`))[0].r; ok(R.error==='wrong passcode','set power: passcode needed');
   R = (await q(`select public.kiosk_app_set_power('123456','app-g1','11:30-08:00') r`))[0].r; ok(!!R.error,'set power: end before start rejected');
   R = (await q(`select public.kiosk_app_set_power('123456','app-g1','8-11') r`))[0].r; ok(!!R.error,'set power: bad format rejected');
@@ -207,7 +224,7 @@ if (MH > 90 && MH < 1290) {
   await beat({device_id:'app-g1',charging:false,battery:9}); await q(`select public.kiosk_app_tick()`);
   ok((await q(`select count(*)::int n from sent where msg like '%CRITICAL 9%'`))[0].n===1,'generator off: 10% CRITICAL still sent');
   // status for dashboard
-  let ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  let ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.name==='Carmen kiosk G');
   ok(ST2.power_expected===false && ST2.may_run_out===true && !!ST2.power_back_at,'status: generator off, may run out, back-at time');
   // generator ON (window started 30 min ago) and not charging -> NOT CHARGING with generator wording
   await q(`delete from sent`);
@@ -217,7 +234,7 @@ if (MH > 90 && MH < 1290) {
   await q(`select public.kiosk_app_tick()`);
   G=(await q(`select msg from sent where msg like '%NOT CHARGING%'`)).map(x=>x.msg);
   ok(G.length===1 && G[0].includes('generator should be ON') && G[0].includes('Battery 60%'),'generator on + not charging: alert: '+G[0]);
-  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.name==='Carmen kiosk G');
   ok(ST2.power_expected===true && ST2.may_run_out===false,'status: generator on');
   ok((await q(`select count(*)::int n from sent where msg like '%60%% and NOT CHARGING%' or msg like '%battery 60%'`))[0].n===0,'no stale battery-step message when generator comes on');
   // generator just started (grace): no NOT CHARGING and NO false run-out warning
@@ -227,7 +244,7 @@ if (MH > 90 && MH < 1290) {
   await q(`update kiosk_app_devices set unplugged_alerted_at=null, unplugged_alerted=false, risk_alerted_for=null where device_id='app-g1'`);
   await q(`select public.kiosk_app_tick()`);
   ok((await q(`select count(*)::int n from sent`))[0].n===0,'generator start grace: no NOT CHARGING, no false run-out');
-  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.name==='Carmen kiosk G');
   ok(ST2.power_state==='grace' && ST2.may_run_out===false && ST2.generator===true,'status in grace: no may_run_out');
   // overtime part: on battery is normal; no NOT CHARGING, no 50/30/20 steps
   await q(`delete from sent`);
@@ -282,6 +299,31 @@ ok((await q(`select drain_anchor_at is null ok from kiosk_app_devices where devi
 await q(`update kiosk_app_devices set drain_on_n=3, sched_on='00:00', sched_off='00:01' where device_id='app-d1'`);
 L = (await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id==='app-d1');
 ok(L.drain_on!==null && L.drain_off===null && L.asleep===true,'list: learned rate after 3, asleep by schedule');
+// ---- weak charger, named tablets kept, evening screen-off ----
+await q(`delete from sent`);
+await beat({device_id:'app-w2',name:'Weak test',charging:true,charge_state:'discharging',battery:60});
+await q(`update kiosk_app_devices set weak_since=now()-interval '16 minutes' where device_id='app-w2'`);
+await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%PLUGGED IN but NOT taking charge%'`))[0].n===1,'weak charger alert once');
+await beat({device_id:'app-w2',charging:true,charge_state:'not_charging',battery:85});
+ok((await q(`select weak_since is null ok from kiosk_app_devices where device_id='app-w2'`))[0].ok,'not_charging at 85% (Protect battery) is not a weak charger');
+await q(`update kiosk_app_devices set last_seen=now()-interval '9 days' where device_id='app-w2'`);
+await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from kiosk_app_devices where device_id='app-w2'`))[0].n===1,'named tablet silent 9 days is kept (generator hours survive a shutdown)');
+ok((await q(`select public.kiosk_app_forget('123456','app-w2') r`))[0].r.ok===true && (await q(`select count(*)::int n from kiosk_app_devices where device_id='app-w2'`))[0].n===0,'office can forget a tablet');
+// ---- token: lost first reply must not lock the tablet out ----
+const t1 = (await q(`select public.kiosk_app_beat('{"device_id":"app-tk1","name":"Token test"}') r`))[0].r;
+ok(/^[0-9a-f-]{36}$/.test(t1.token||''),'first report gets a secret');
+const t2 = (await q(`select public.kiosk_app_beat('{"device_id":"app-tk1","battery":50}') r`))[0].r;
+ok(t2.token===t1.token && !t2.error,'first reply lost: next report without secret accepted, same secret sent again');
+const t3 = (await q(`select public.kiosk_app_beat($1::jsonb) r`,[JSON.stringify({device_id:'app-tk1',token:t1.token,battery:49})]))[0].r;
+ok(!t3.error && !t3.token && (await q(`select token_confirmed c from kiosk_app_devices where device_id='app-tk1'`))[0].c===true,'secret sent back: confirmed');
+const t4 = (await q(`select public.kiosk_app_beat('{"device_id":"app-tk1","battery":10}') r`))[0].r;
+ok(t4.error==='token' && (await q(`select battery from kiosk_app_devices where device_id='app-tk1'`))[0].battery===49,'after confirm: report without secret refused');
+const t5 = (await q(`select public.kiosk_app_beat('{"device_id":"app-tk1","token":"guess"}') r`))[0].r;
+ok(t5.error==='token','wrong secret refused');
+await beat({device_id:'app-tk1',token:t1.token,name:'Niño kiosk'});
+ok((await q(`select name from kiosk_app_devices where device_id='app-tk1'`))[0].name==='Niño kiosk','accented names kept');
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}

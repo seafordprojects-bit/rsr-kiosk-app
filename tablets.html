@@ -145,6 +145,7 @@ function render(rows) {
         <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
         <button onclick="send('${id}','open_settings','','Open the settings screen on the tablet (no passcode needed for 10 minutes)?')">Open settings</button>
         <button class="danger" onclick="send('${id}','restart','','Restart the tablet now? Workers cannot punch for about 1 minute.')">Restart tablet</button>
+        <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
       </div>
       ${ev ? '<ul class="ev">' + ev + '</ul>' : ''}
     </div>`;
@@ -159,6 +160,13 @@ async function send(device, cmd, arg, confirmText) {
     show('Sent "' + cmd + '". The tablet picks it up within about 1 minute.', 'ok');
     load();
   } catch (e) { show('Not sent: ' + e.message, 'err'); }
+}
+
+function forgetTablet(device, name) {
+  if (!confirm('Forget "' + name + '"?\nOnly after a factory reset or reinstall of that tablet. It registers again by itself; its generator hours must then be set again.')) return;
+  rpc('kiosk_app_forget', { p_passcode: passcode, p_device: device })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show('Tablet forgotten.', 'ok'); load(); } })
+    .catch(e => show('Not done: ' + e.message, 'err'));
 }
 
 function askPower(device, cur) {

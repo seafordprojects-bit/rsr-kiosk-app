@@ -20,6 +20,7 @@ public class BootReceiver extends BroadcastReceiver {
         Policy.applyKioskPolicies(c);
         core.scheduleNextAlarm();
         core.scheduleReportAlarm();
+        core.scheduleUpdateAlarm();
         core.bringToFront();
     }
 }

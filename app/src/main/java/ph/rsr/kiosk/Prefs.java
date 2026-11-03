@@ -38,6 +38,10 @@ final class Prefs {
     String pageDeviceId() { return sp.getString("page_dev", ""); }
     void setPageDeviceId(String id) { sp.edit().putString("page_dev", id).apply(); }
 
+    /** Secret the server gave this tablet on its first report; proves later reports really come from it. */
+    String token() { return sp.getString("srv_token", ""); }
+    void setToken(String t) { sp.edit().putString("srv_token", t).commit(); }
+
     long lastCmdDone() { return sp.getLong("cmd_done", 0L); }
     void setLastCmdDone(long id) { sp.edit().putLong("cmd_done", id).commit(); }
 

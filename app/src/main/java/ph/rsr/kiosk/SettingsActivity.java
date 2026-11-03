@@ -272,6 +272,7 @@ public class SettingsActivity extends Activity {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
+        Core.get(this).touched();   // using settings counts as activity: the screen must not turn off
         if (!setup) {
             ui.removeCallbacks(idleClose);
             ui.postDelayed(idleClose, IDLE_CLOSE_MS);

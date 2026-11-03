@@ -37,7 +37,21 @@ final class Config {
      */
     static final String[] REPORT_WAKE_TIMES = { "09:53", "09:59", "14:52", "14:58", "19:02", "19:08" };
 
-    /** Default screen schedule (Manila time on the tablet). After the 10 PM OT cut-off. */
-    static final String DEFAULT_ON = "05:30";
-    static final String DEFAULT_OFF = "22:30";
+    /** Default screen schedule (Manila time on the tablet): on before the first 7:00 punch, latest off
+     *  after midnight overtime. Change per tablet on the Tablets page. */
+    static final String DEFAULT_ON = "06:45";
+    static final String DEFAULT_OFF = "00:15";
+
+    /** From this time the screen turns off after EVENING_IDLE_MIN minutes without a touch (overtime may end
+     *  at 9, 10 or 12 PM). The power button always wakes it for the next worker. */
+    static final String EVENING_IDLE_FROM = "21:00";
+    static final int EVENING_IDLE_MIN = 15;
+    /** Outside the schedule, a screen woken with the power button stays on this long after the last touch. */
+    static final int NIGHT_IDLE_MIN = 2;
+
+    /** Punch rush times: the app never restarts, updates or reloads the page then (owner 2026-11-03). */
+    static final String[][] RUSH = { {"06:50", "08:15"}, {"11:50", "13:10"}, {"16:50", "18:10"} };
+    /** App updates install by themselves only in this window, and only when nobody is using the kiosk. */
+    static final String UPDATE_FROM = "00:30";
+    static final String UPDATE_TO = "04:30";
 }

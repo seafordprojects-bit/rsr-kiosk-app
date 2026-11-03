@@ -78,7 +78,8 @@ If it says *"there are already some accounts on the device"*, an account was add
 ## 7b. Carmen only (generator power)
 
 On the RSR Tablets page, for **Carmen kiosk**:
-1. **Set schedule** -> `06:45-22:30` (screen on 15 min before the first 7:00 AM punch).
+1. **Set schedule**: already `06:45-00:15` by default (screen on 15 min before the first 7:00 AM punch; from 9 PM the
+   screen turns off after 15 min without a touch, latest 00:15; the power button always wakes it).
 2. **Generator hours** -> `08:00-11:30,13:00-16:30,18:00-21:00+24:00`.
    `+24:00` means overtime MAY run until 24:00: from 9 PM the tablet on battery is normal (no "not charging"
    alerts), you are only warned if the battery may run out before 8 AM.
@@ -104,11 +105,17 @@ Tap the **top-right corner 5 times quickly** (within 3 seconds), then enter the 
 Forgot the exit passcode: on the RSR Tablets page press **Open settings** for that tablet. The tablet opens
 settings once, without the passcode, within about 1 minute.
 
+## 8b. Replacing or resetting a tablet
+
+Each tablet gets a secret from the server on its first start. After a factory reset or reinstall it has a new secret,
+so first press **Forget tablet** for it on the RSR Tablets page; it registers again within a minute.
+
 ## 9. Updates
 
 - **Kiosk page changes (rsr-engineering):** nothing to do. The tablet shows the new page like before.
-- **App changes:** a new build appears in Releases by itself. Tablets install it at night, or press
-  **Update app** on the RSR Tablets page. No tapping on the tablet.
+- **App changes:** a new build appears in Releases by itself. Tablets install it between 00:30 and 04:30 when nobody
+  is using the kiosk, or press **Update app** on the RSR Tablets page. Update, restart and reload are refused during
+  punch rushes (6:50-8:15, 11:50-1:10, 4:50-6:10) and wait until nobody is mid-punch. No tapping on the tablet.
 
 ## Signing key (keep safe)
 

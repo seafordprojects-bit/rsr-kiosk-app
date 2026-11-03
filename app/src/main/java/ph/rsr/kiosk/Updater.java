@@ -32,8 +32,13 @@ final class Updater {
         }
     }
 
+    /** Asked right before the install starts (the app stops while installing). */
+    interface Gate { boolean ok(); }
+
+    static String checkAndInstall(Context c) { return checkAndInstall(c, () -> true); }
+
     /** Runs on the background thread. Returns a short result line for the office/settings screen. */
-    static String checkAndInstall(Context c) {
+    static String checkAndInstall(Context c, Gate gate) {
         try {
             JSONObject rel = new JSONObject(Net.get(Config.RELEASES_LATEST));
             String tag = rel.optString("tag_name", "");
@@ -50,7 +55,7 @@ final class Updater {
             }
             if (url == null || !url.startsWith("https://github.com/seafordprojects-bit/rsr-kiosk-app/")) return "apk missing in release";
 
-            install(c, url);
+            if (!install(c, url, gate)) return "update postponed: kiosk in use";
             return "installing build " + latest;
         } catch (Exception e) {
             Log.w(TAG, "update failed", e);
@@ -58,7 +63,7 @@ final class Updater {
         }
     }
 
-    private static void install(Context c, String url) throws Exception {
+    private static boolean install(Context c, String url, Gate gate) throws Exception {
         PackageInstaller pi = c.getPackageManager().getPackageInstaller();
         PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(c.getPackageName());
@@ -77,10 +82,13 @@ final class Updater {
         } finally {
             conn.disconnect();
         }
+        // Downloading takes a while: check again that nobody is punching right before the app stops.
+        if (!gate.ok()) { s.abandon(); return false; }
         Intent i = new Intent(c, InstallReceiver.class);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
         PendingIntent p = PendingIntent.getBroadcast(c, id, i, flags);
         s.commit(p.getIntentSender());
         s.close();
+        return true;
     }
 }

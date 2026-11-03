@@ -134,7 +134,8 @@ public class KioskActivity extends Activity implements Core.Host {
             public void onPageStarted(WebView v, String url, android.graphics.Bitmap f) {
                 mainFrameError = false;
                 loading = true;
-                hangAskedAt = 0;   // a navigation drops a pending hang check; never blame the new page for it
+                hangAskedAt = 0;
+                if (backlightLow) setBacklightLow(false);   // a fresh page is never left on a dark screen   // a navigation drops a pending hang check; never blame the new page for it
                 if (url != null) lastUrl = url;
             }
 
@@ -301,7 +302,7 @@ public class KioskActivity extends Activity implements Core.Host {
         super.onResume();
         Core core = Core.get(this);
         core.setHost(this);
-        applyScreenFlag(core.isOnHours());
+        applyScreenFlag(true);   // the app decides when the screen goes off (Core.checkScheduleTransition)
         hideBars();
         if (!prefs.inMaintenance()) startLock();
         if (web != null) web.onResume();
@@ -444,6 +445,17 @@ public class KioskActivity extends Activity implements Core.Host {
     @Override
     public String pageUrl() {
         return lastUrl;   // safe from the background thread
+    }
+
+    @Override
+    public void pageBusy(java.util.function.Consumer<Boolean> answer) {
+        if (web == null || mainFrameError) { answer.accept(false); return; }
+        // Same check the kiosk page itself uses before applying its own updates (kiosk/index.html):
+        // an employee selected, or any dialog open = a worker is mid-punch.
+        web.evaluateJavascript("(function(){try{if(typeof curEmp!=='undefined'&&curEmp)return true;"
+                + "if(typeof pin!=='undefined'&&pin)return true;"
+                + "if(document.querySelector('.modal-bg.show'))return true;}catch(e){}return false;})()",
+                v -> answer.accept("true".equals(v)));
     }
 
     @Override
