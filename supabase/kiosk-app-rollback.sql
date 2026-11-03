@@ -9,6 +9,8 @@ drop function if exists public.kiosk_app_power_on(text, int);
 drop function if exists public.kiosk_app_power_state(text, int);
 drop function if exists public.kiosk_app_next_power(text, timestamptz);
 drop function if exists public.kiosk_app_need_pct(timestamptz, timestamptz, text, text);
+drop function if exists public.kiosk_app_need_pct(timestamptz, timestamptz, text, text, numeric, numeric);
+drop function if exists public.kiosk_app_awake_now(text, text);
 drop function if exists public.kiosk_app_command(text, text, text, text);
 drop function if exists public.kiosk_app_list(text);
 drop function if exists public.kiosk_app_status();

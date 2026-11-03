@@ -55,6 +55,12 @@ public class KioskActivity extends Activity implements Core.Host {
     private long hangAskedAt = 0;
     private long lastRebuild = 0;
     private PermissionRequest pendingCamRequest;
+    private long lastTouchAt = SystemClock.elapsedRealtime();
+    private boolean backlightLow = false;
+    /** The kiosk page blacks itself out after 6 min without a touch (5 min dim + 60 s). Shortly after
+     *  that the app turns the real backlight down too: the page is black, so nobody sees a difference,
+     *  but the screen light was the biggest battery user. The next touch brings it back. */
+    private static final long BACKLIGHT_LOW_AFTER_MS = 6 * 60_000L + 15_000L;
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
     private ConnectivityManager.NetworkCallback netCb;
@@ -82,6 +88,7 @@ public class KioskActivity extends Activity implements Core.Host {
         Core.get(this).setHost(this);
         watchNetwork();
         ui.postDelayed(hangCheck, Config.HANG_CHECK_MS);
+        ui.postDelayed(backlightCheck, 30_000);
 
         if (!prefs.hasPasscode()) {
             // First run: set the exit passcode and tablet name before anything else.
@@ -242,6 +249,21 @@ public class KioskActivity extends Activity implements Core.Host {
         }
     };
 
+    private final Runnable backlightCheck = new Runnable() {
+        @Override
+        public void run() {
+            if (!backlightLow && SystemClock.elapsedRealtime() - lastTouchAt > BACKLIGHT_LOW_AFTER_MS) setBacklightLow(true);
+            ui.postDelayed(this, 30_000);
+        }
+    };
+
+    private void setBacklightLow(boolean low) {
+        backlightLow = low;
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = low ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(lp);
+    }
+
     private void readPageDeviceId() {
         web.evaluateJavascript("(function(){try{return localStorage.getItem('rsr_device_id')||''}catch(e){return ''}})()", v -> {
             if (v == null) return;
@@ -345,6 +367,8 @@ public class KioskActivity extends Activity implements Core.Host {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         Core.get(this).touched();
+        lastTouchAt = SystemClock.elapsedRealtime();
+        if (backlightLow) setBacklightLow(false);
         if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
             float zone = 90 * getResources().getDisplayMetrics().density;
             if (ev.getX() > root.getWidth() - zone && ev.getY() < zone) {

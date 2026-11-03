@@ -82,6 +82,15 @@ alter table public.kiosk_app_devices add column if not exists hot_alerted       
 -- Format "08:00-11:30,13:00-16:30,18:00-21:00" (Manila time). Set on the Tablets page.
 alter table public.kiosk_app_devices add column if not exists power_windows      text;
 alter table public.kiosk_app_devices add column if not exists risk_alerted_for   timestamptz;
+-- Measured battery drain (%/hour) with the screen on and off, learned from this tablet's own reports,
+-- so "may run out" uses real numbers instead of an estimate. Anchor = start of the current measurement.
+alter table public.kiosk_app_devices add column if not exists drain_on           numeric(5,2);
+alter table public.kiosk_app_devices add column if not exists drain_off          numeric(5,2);
+alter table public.kiosk_app_devices add column if not exists drain_on_n         integer not null default 0;
+alter table public.kiosk_app_devices add column if not exists drain_off_n        integer not null default 0;
+alter table public.kiosk_app_devices add column if not exists drain_anchor_at    timestamptz;
+alter table public.kiosk_app_devices add column if not exists drain_anchor_batt  integer;
+alter table public.kiosk_app_devices add column if not exists drain_anchor_screen boolean;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -105,6 +114,7 @@ declare
   v_ev   text := left(btrim(coalesce(p->>'event','')), 120);
   v_out  jsonb := case when jsonb_typeof(p->'outage') = 'object' then p->'outage' end;
   v_otxt text;
+  v_prev timestamptz;
   d      public.kiosk_app_devices%rowtype;
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
@@ -116,6 +126,7 @@ begin
 
   insert into public.kiosk_app_devices as k (device_id) values (v_id)
   on conflict (device_id) do nothing;
+  select k.last_seen into v_prev from public.kiosk_app_devices k where k.device_id = v_id;
 
   update public.kiosk_app_devices k set
     name            = left(coalesce(nullif(btrim(p->>'name'),''), k.name), 60),
@@ -147,6 +158,41 @@ begin
      and (select count(*) from public.kiosk_app_events x
            where x.device_id = v_id and x.at > now() - interval '1 hour') < 20 then
     insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
+  end if;
+
+  -- DRAIN LEARNING. A measurement runs while the tablet is on battery with the screen in one state.
+  -- It ends when the screen state changes, charging starts, or the battery has dropped 5 points; if it
+  -- lasted at least 20 min and dropped at least 2 points, it updates the average (70% old / 30% new).
+  if d.charging is false and d.battery is not null then
+    if d.drain_anchor_at is null then
+      update public.kiosk_app_devices k set drain_anchor_at = now(), drain_anchor_batt = d.battery,
+             drain_anchor_screen = d.screen_on where k.device_id = v_id;
+    elsif d.screen_on is distinct from d.drain_anchor_screen or d.drain_anchor_batt - d.battery >= 5
+          or v_prev < now() - interval '15 minutes' then
+      -- a gap in reports while the screen was ON (tablet slept / no Wi-Fi) makes the screen-on figure
+      -- unreliable: that measurement is dropped. A gap with the screen OFF is the normal night sleep.
+      if now() - d.drain_anchor_at >= interval '20 minutes' and d.drain_anchor_batt - d.battery >= 2
+         and not (d.drain_anchor_screen and v_prev < now() - interval '15 minutes') then
+        if d.drain_anchor_screen then
+          update public.kiosk_app_devices k set
+            drain_on = round(case when k.drain_on is null then x.r else k.drain_on * 0.7 + x.r * 0.3 end, 2),
+            drain_on_n = k.drain_on_n + 1
+          from (select least(60, (d.drain_anchor_batt - d.battery) / (extract(epoch from now() - d.drain_anchor_at) / 3600.0)) as r) x
+          where k.device_id = v_id;
+        else
+          update public.kiosk_app_devices k set
+            drain_off = round(case when k.drain_off is null then x.r else k.drain_off * 0.7 + x.r * 0.3 end, 2),
+            drain_off_n = k.drain_off_n + 1
+          from (select least(60, (d.drain_anchor_batt - d.battery) / (extract(epoch from now() - d.drain_anchor_at) / 3600.0)) as r) x
+          where k.device_id = v_id;
+        end if;
+      end if;
+      update public.kiosk_app_devices k set drain_anchor_at = now(), drain_anchor_batt = d.battery,
+             drain_anchor_screen = d.screen_on where k.device_id = v_id;
+    end if;
+  elsif d.drain_anchor_at is not null then
+    update public.kiosk_app_devices k set drain_anchor_at = null, drain_anchor_batt = null, drain_anchor_screen = null
+     where k.device_id = v_id;
   end if;
 
   -- The tablet just came back and tells us how long it was cut off, and why (no Wi-Fi, no internet,
@@ -204,6 +250,8 @@ begin
            'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes',
            'wifi', k.wifi, 'internet', k.internet, 'wifi_signal', k.wifi_signal,
            'battery_temp', k.battery_temp, 'last_outage', k.last_outage, 'power_windows', k.power_windows,
+           'drain_on', case when k.drain_on_n >= 3 then k.drain_on end, 'drain_off', case when k.drain_off_n >= 3 then k.drain_off end,
+           'asleep', not public.kiosk_app_awake_now(k.sched_on, k.sched_off),
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
            'pending', (k.cmd_id is not null and k.cmd_id > coalesce(k.cmd_done_id,0) and k.cmd_at > now() - interval '30 minutes'),
            'events', (select coalesce(jsonb_agg(jsonb_build_object('event', e.event, 'at', e.at) order by e.at desc), '[]'::jsonb)
@@ -262,6 +310,17 @@ returns integer language sql immutable as $$
 $$;
 revoke all on function public.kiosk_app_hhmm(text) from public, anon, authenticated;
 
+-- Is the tablet's screen schedule ON right now (Manila)? No schedule = always.
+create or replace function public.kiosk_app_awake_now(p_on text, p_off text)
+returns boolean language plpgsql stable as $$
+declare m int := extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila'));
+        a int := public.kiosk_app_hhmm(p_on); b int := public.kiosk_app_hhmm(p_off);
+begin
+  if a is null or b is null or a = b then return true; end if;
+  return case when a < b then m >= a and m < b else m >= a or m < b end;
+end $$;
+revoke all on function public.kiosk_app_awake_now(text, text) from public, anon, authenticated;
+
 -- STEP 6c - generator-hours helpers (Manila time)
 -- Generator state at minute-of-day p_min. Window text: "08:00-11:30,13:00-16:30,18:00-21:00+24:00"
 -- ("+24:00" = overtime: the generator MAY run until 24:00). Returns:
@@ -310,12 +369,17 @@ begin
   return best;
 end $$;
 
--- Battery % needed from p_from to p_to: about 20%/hour with the screen on (camera preview runs all
--- the time), 3%/hour with the screen off by the schedule, plus 10% margin. Rough, on the safe side.
-create or replace function public.kiosk_app_need_pct(p_from timestamptz, p_to timestamptz, p_on text, p_off text)
+-- Battery % needed from p_from to p_to, plus 10% margin. Uses this tablet's MEASURED drain (%/hour,
+-- screen on / off) once it has 3+ measurements; until then a safe starting estimate: 15%/h with the
+-- screen on (camera preview runs all the time; the app turns the backlight down while the page is
+-- black) and 3%/h with the screen off by the schedule.
+create or replace function public.kiosk_app_need_pct(p_from timestamptz, p_to timestamptz, p_on text, p_off text,
+                                                     p_rate_on numeric default null, p_rate_off numeric default null)
 returns integer language plpgsql stable as $$
 declare t timestamptz := p_from; m int; v_on int := public.kiosk_app_hhmm(p_on); v_off int := public.kiosk_app_hhmm(p_off);
         awake boolean; need numeric := 10; n int := 0;
+        r_on numeric := least(40, greatest(3, coalesce(p_rate_on, 15)));
+        r_off numeric := least(15, greatest(0.5, coalesce(p_rate_off, 3)));
 begin
   if p_to is null then return null; end if;
   while t < p_to and n < 200 loop
@@ -323,15 +387,17 @@ begin
     awake := case when v_on is null or v_off is null or v_on = v_off then true
                   when v_on < v_off then m >= v_on and m < v_off
                   else m >= v_on or m < v_off end;
-    need := need + case when awake then 5 else 0.75 end;   -- per 15 minutes
+    need := need + case when awake then r_on else r_off end / 4.0;   -- per 15 minutes
     t := t + interval '15 minutes'; n := n + 1;
   end loop;
   return ceil(need)::int;
 end $$;
+-- the old 4-argument version (replaced by the one above with optional measured rates)
+drop function if exists public.kiosk_app_need_pct(timestamptz, timestamptz, text, text);
 revoke all on function public.kiosk_app_power_on(text, int) from public, anon, authenticated;
 revoke all on function public.kiosk_app_power_state(text, int) from public, anon, authenticated;
 revoke all on function public.kiosk_app_next_power(text, timestamptz) from public, anon, authenticated;
-revoke all on function public.kiosk_app_need_pct(timestamptz, timestamptz, text, text) from public, anon, authenticated;
+revoke all on function public.kiosk_app_need_pct(timestamptz, timestamptz, text, text, numeric, numeric) from public, anon, authenticated;
 
 -- STEP 5b - office page: set a tablet's generator hours (admin passcode). '' = normal grid power.
 create or replace function public.kiosk_app_set_power(p_passcode text, p_device text, p_windows text)
@@ -379,7 +445,8 @@ returns jsonb language sql stable security definer set search_path = public as $
            'power_back_at', public.kiosk_app_next_power(k.power_windows, now()),
            'may_run_out', case when k.power_windows is not null and k.charging is false and k.battery is not null
                                     and st.state in ('off', 'overtime')
-                               then k.battery < public.kiosk_app_need_pct(now(), public.kiosk_app_next_power(k.power_windows, now()), k.sched_on, k.sched_off)
+                               then k.battery < public.kiosk_app_need_pct(now(), public.kiosk_app_next_power(k.power_windows, now()), k.sched_on, k.sched_off,
+                                      case when k.drain_on_n >= 3 then k.drain_on end, case when k.drain_off_n >= 3 then k.drain_off end)
                                else false end) as j
       from public.kiosk_app_devices k
       cross join lateral (select public.kiosk_app_power_state(k.power_windows,
@@ -491,7 +558,8 @@ begin
     -- the generator is back. One warning per power-off period.
     if v_win and v_state in ('off', 'overtime') and r.charging is false and r.battery is not null then
       v_next := public.kiosk_app_next_power(r.power_windows, now());
-      v_need := public.kiosk_app_need_pct(now(), v_next, r.sched_on, r.sched_off);
+      v_need := public.kiosk_app_need_pct(now(), v_next, r.sched_on, r.sched_off,
+                  case when r.drain_on_n >= 3 then r.drain_on end, case when r.drain_off_n >= 3 then r.drain_off end);
       if v_next is not null and r.battery < v_need and r.risk_alerted_for is distinct from v_next then
         perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' on battery (generator off): ' || r.battery
                 || '% now. Generator back at ' || to_char(v_next at time zone 'Asia/Manila', 'HH12:MI AM')

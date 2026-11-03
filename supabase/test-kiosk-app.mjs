@@ -247,9 +247,41 @@ if (MH > 90 && MH < 1290) {
   await beat({device_id:'app-g1',charging:true,battery:20}); await q(`select public.kiosk_app_tick()`);
   ok((await q(`select risk_alerted_for is null ok from kiosk_app_devices where device_id='app-g1'`))[0].ok,'charging clears run-out flag');
   // need_pct: 1 h awake = 20% + 10 margin = 30
-  ok((await q(`select public.kiosk_app_need_pct(now(), now()+interval '1 hour', '00:00','23:59') n`))[0].n===30,'need 30% for 1 h awake');
+  ok((await q(`select public.kiosk_app_need_pct(now(), now()+interval '1 hour', '00:00','23:59') n`))[0].n===25,'need 25% for 1 h awake (starting estimate 15%/h + 10)');
+  ok((await q(`select public.kiosk_app_need_pct(now(), now()+interval '1 hour', '00:00','23:59', 8, null) n`))[0].n===18,'measured 8%/h used: need 18%');
+  ok((await q(`select public.kiosk_app_need_pct(now(), now()+interval '1 hour', '00:00','23:59', 500, null) n`))[0].n===50,'crazy measured rate clamped to 40%/h');
+  // a Carmen night at 9 PM with the starting estimate: 21:00-22:30 on, 22:30-06:45 off, 06:45-08:00 on
+  const night=(await q(`select public.kiosk_app_need_pct('2026-11-03 21:00+08','2026-11-04 08:00+08','06:45','22:30') n`))[0].n;
+  ok(night <= 80,'9 PM to 8 AM need with starting estimate is under 85% (no nightly false warning): '+night);
   ok((await q(`select public.kiosk_app_set_power('123456','app-g1','') r`))[0].r.ok===true && (await q(`select power_windows is null ok from kiosk_app_devices where device_id='app-g1'`))[0].ok,'clear generator hours = grid power');
 }
+// ---- drain learning ----
+await q(`delete from kiosk_app_devices where device_id like 'app-t%'`);
+await beat({device_id:'app-d1',name:'Drain test',charging:false,battery:80,screen_on:true});
+let D=(await q(`select drain_anchor_batt b, drain_anchor_screen s from kiosk_app_devices where device_id='app-d1'`))[0];
+ok(D.b===80 && D.s===true,'drain: anchor set on battery');
+await q(`update kiosk_app_devices set drain_anchor_at=now()-interval '30 minutes', last_seen=now()-interval '1 minute' where device_id='app-d1'`);
+await beat({device_id:'app-d1',charging:false,battery:75,screen_on:true});
+D=(await q(`select drain_on::float r, drain_on_n n, drain_anchor_batt b from kiosk_app_devices where device_id='app-d1'`))[0];
+ok(D.n===1 && Math.abs(D.r-10)<0.2 && D.b===75,'drain: 5 points in 30 min = 10%/h learned: '+D.r);
+// screen off overnight with a long gap: counts as sleep drain
+await beat({device_id:'app-d1',charging:false,battery:75,screen_on:false});
+await q(`update kiosk_app_devices set drain_anchor_at=now()-interval '8 hours', last_seen=now()-interval '8 hours' where device_id='app-d1'`);
+await beat({device_id:'app-d1',charging:false,battery:51,screen_on:true});
+D=(await q(`select drain_off::float r, drain_off_n n from kiosk_app_devices where device_id='app-d1'`))[0];
+ok(D.n===1 && Math.abs(D.r-3)<0.1,'drain: night sleep 24 points in 8 h = 3%/h: '+D.r);
+// screen ON with a long gap: dropped
+await q(`update kiosk_app_devices set drain_anchor_at=now()-interval '3 hours', last_seen=now()-interval '3 hours' where device_id='app-d1'`);
+await beat({device_id:'app-d1',charging:false,battery:40,screen_on:true});
+D=(await q(`select drain_on_n n from kiosk_app_devices where device_id='app-d1'`))[0];
+ok(D.n===1,'drain: screen-on measurement across a reporting gap is dropped');
+// charging clears the anchor
+await beat({device_id:'app-d1',charging:true,battery:41,screen_on:true});
+ok((await q(`select drain_anchor_at is null ok from kiosk_app_devices where device_id='app-d1'`))[0].ok,'drain: charging ends the measurement');
+// list shows learned rates only after 3 measurements, and asleep flag
+await q(`update kiosk_app_devices set drain_on_n=3, sched_on='00:00', sched_off='00:01' where device_id='app-d1'`);
+L = (await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id==='app-d1');
+ok(L.drain_on!==null && L.drain_off===null && L.asleep===true,'list: learned rate after 3, asleep by schedule');
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
