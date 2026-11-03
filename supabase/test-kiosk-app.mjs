@@ -172,6 +172,84 @@ await beat({device_id:'app-w1',charging:true,battery:80,battery_temp:'38'}); awa
 ok((await q(`select hot_alerted from kiosk_app_devices where device_id='app-w1'`))[0].hot_alerted===false,'hot flag clears below 40 C');
 L = (await q(`select public.kiosk_app_list('123456') r`))[0].r;
 ok(L.some(x=>'wifi_signal' in x && 'battery_temp' in x && 'last_outage' in x),'list includes wifi/temp/outage');
+// ---- generator hours (Carmen) ----
+if (MH > 90 && MH < 1290) {
+  await q(`delete from kiosk_app_devices where device_id like 'app-t%'`);   // free the 20-tablet cap used earlier
+  await q(`delete from sent`);
+  await beat({device_id:'app-g1',name:'Carmen kiosk',charging:true,battery:80,sched_on:'06:45',sched_off:'22:30'});
+  let R = (await q(`select public.kiosk_app_set_power('000000','app-g1','08:00-11:30') r`))[0].r; ok(R.error==='wrong passcode','set power: passcode needed');
+  R = (await q(`select public.kiosk_app_set_power('123456','app-g1','11:30-08:00') r`))[0].r; ok(!!R.error,'set power: end before start rejected');
+  R = (await q(`select public.kiosk_app_set_power('123456','app-g1','8-11') r`))[0].r; ok(!!R.error,'set power: bad format rejected');
+  R = (await q(`select public.kiosk_app_set_power('123456','app-g1','08:00-11:30, 13:00-16:30,18:00-21:00+24:00') r`))[0].r; ok(R.ok===true,'set power: Carmen hours accepted (spaces, +24:00 overtime)');
+  ok((await q(`select power_windows from kiosk_app_devices where device_id='app-g1'`))[0].power_windows==='08:00-11:30,13:00-16:30,18:00-21:00+24:00','set power: stored clean');
+  R = (await q(`select public.kiosk_app_set_power('123456','app-g1','08:00-08:20') r`))[0].r; ok(!!R.error,'set power: under 30 min rejected');
+  R = (await q(`select public.kiosk_app_set_power('123456','app-g1','18:00-21:00+20:00') r`))[0].r; ok(!!R.error,'set power: overtime before stop rejected');
+  const ST=(await q(`select public.kiosk_app_power_state('08:00-11:30,13:00-16:30,18:00-21:00+24:00', m) s, m from unnest(array[455,485,680,687,690,750,790,1000,1095,1100,1258,1265,1439,5]) m`)).map(x=>x.m+':'+x.s).join(' ');
+  ok(ST==='455:off 485:grace 680:on 687:grace 690:off 750:off 790:grace 1000:off 1095:on 1100:on 1258:grace 1265:overtime 1439:overtime 5:off','power states through a Carmen day: '+ST);
+  await q(`select public.kiosk_app_set_power('123456','app-g1','08:00-11:30,13:00-16:30,18:00-21:00+24:00')`);
+  ok((await q(`select public.kiosk_app_power_on('08:00-11:30,13:00-16:30',${8*60+20}) a, public.kiosk_app_power_on('08:00-11:30,13:00-16:30',${8*60+10}) b, public.kiosk_app_power_on('08:00-11:30,13:00-16:30',${12*60}) c, public.kiosk_app_power_on(null,${12*60}) d`))[0].a===true,'power_on: 8:20 on');
+  const P=(await q(`select public.kiosk_app_power_on('08:00-11:30,13:00-16:30',${8*60+10}) b, public.kiosk_app_power_on('08:00-11:30,13:00-16:30',${12*60}) c, public.kiosk_app_power_on(null,${12*60}) d, public.kiosk_app_power_on('08:00-11:30',${11*60+27}) e`))[0];
+  ok(P.b===false && P.c===false && P.d===true && P.e===false,'power_on: 15-min start grace, lunch off, grid always on, 5 min before stop');
+  // generator OFF now, not charging, plenty of battery -> silence
+  await q(`select public.kiosk_app_set_power('123456','app-g1',$1)`,[hh(MH+60)+'-'+hh(MH+120)]);
+  await beat({device_id:'app-g1',charging:false,battery:90});
+  await q(`update kiosk_app_devices set unplugged_since=now()-interval '40 minutes', batt_step=100 where device_id='app-g1'`);
+  await beat({device_id:'app-g1',charging:false,battery:48});
+  await q(`select public.kiosk_app_tick()`);
+  let G=(await q(`select msg from sent`)).map(x=>x.msg).filter(m=>m.includes('Carmen kiosk'));
+  ok(G.length===0,'generator off, battery fine: no alerts at all (no NOT CHARGING, no 50% step): '+JSON.stringify(G));
+  // generator OFF, battery too low to last -> one run-out warning
+  await beat({device_id:'app-g1',charging:false,battery:15});
+  await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  G=(await q(`select msg from sent where msg like '%may RUN OUT%'`)).map(x=>x.msg);
+  ok(G.length===1 && G[0].includes('on battery (generator off): 15%') && G[0].includes('Generator back at'),'run-out warning once: '+G[0]);
+  ok((await q(`select count(*)::int n from sent where msg like '%LOW 15%'`))[0].n===0,'generator off: no 20% LOW step');
+  await beat({device_id:'app-g1',charging:false,battery:9}); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select count(*)::int n from sent where msg like '%CRITICAL 9%'`))[0].n===1,'generator off: 10% CRITICAL still sent');
+  // status for dashboard
+  let ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  ok(ST2.power_expected===false && ST2.may_run_out===true && !!ST2.power_back_at,'status: generator off, may run out, back-at time');
+  // generator ON (window started 30 min ago) and not charging -> NOT CHARGING with generator wording
+  await q(`delete from sent`);
+  await q(`select public.kiosk_app_set_power('123456','app-g1',$1)`,[hh(MH-30)+'-'+hh(MH+120)]);
+  await beat({device_id:'app-g1',charging:false,battery:60});
+  await q(`update kiosk_app_devices set unplugged_alerted_at=null, unplugged_alerted=false where device_id='app-g1'`);
+  await q(`select public.kiosk_app_tick()`);
+  G=(await q(`select msg from sent where msg like '%NOT CHARGING%'`)).map(x=>x.msg);
+  ok(G.length===1 && G[0].includes('generator should be ON') && G[0].includes('Battery 60%'),'generator on + not charging: alert: '+G[0]);
+  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  ok(ST2.power_expected===true && ST2.may_run_out===false,'status: generator on');
+  ok((await q(`select count(*)::int n from sent where msg like '%60%% and NOT CHARGING%' or msg like '%battery 60%'`))[0].n===0,'no stale battery-step message when generator comes on');
+  // generator just started (grace): no NOT CHARGING and NO false run-out warning
+  await q(`delete from sent`);
+  await q(`select public.kiosk_app_set_power('123456','app-g1',$1)`,[hh(MH-3)+'-'+hh(MH+120)]);
+  await beat({device_id:'app-g1',charging:false,battery:40});
+  await q(`update kiosk_app_devices set unplugged_alerted_at=null, unplugged_alerted=false, risk_alerted_for=null where device_id='app-g1'`);
+  await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select count(*)::int n from sent`))[0].n===0,'generator start grace: no NOT CHARGING, no false run-out');
+  ST2=(await q(`select public.kiosk_app_status() r`))[0].r.find(x=>x.device_id==='app-g1');
+  ok(ST2.power_state==='grace' && ST2.may_run_out===false && ST2.generator===true,'status in grace: no may_run_out');
+  // overtime part: on battery is normal; no NOT CHARGING, no 50/30/20 steps
+  await q(`delete from sent`);
+  await q(`select public.kiosk_app_set_power('123456','app-g1',$1)`,[hh(MH-120)+'-'+hh(MH-30)+'+'+hh(MH+120)]);
+  await beat({device_id:'app-g1',charging:false,battery:45});
+  await q(`update kiosk_app_devices set unplugged_since=now()-interval '40 minutes', unplugged_alerted_at=null, unplugged_alerted=false, batt_step=100, risk_alerted_for=null where device_id='app-g1'`);
+  await q(`select public.kiosk_app_tick()`);
+  G=(await q(`select msg from sent`)).map(x=>x.msg);
+  ok(!G.some(m=>m.includes('NOT CHARGING')||m.includes('45% and NOT')),'overtime part: no NOT CHARGING, no steps: '+JSON.stringify(G));
+  // window started only 10 min ago -> grace, no alert
+  await q(`delete from sent`);
+  await q(`select public.kiosk_app_set_power('123456','app-g1',$1)`,[hh(MH-10)+'-'+hh(MH+120)]);
+  await q(`update kiosk_app_devices set unplugged_alerted_at=null, unplugged_alerted=false where device_id='app-g1'`);
+  await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select count(*)::int n from sent where msg like '%NOT CHARGING%'`))[0].n===0,'generator start grace 15 min');
+  // charging again resets the run-out flag
+  await beat({device_id:'app-g1',charging:true,battery:20}); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select risk_alerted_for is null ok from kiosk_app_devices where device_id='app-g1'`))[0].ok,'charging clears run-out flag');
+  // need_pct: 1 h awake = 20% + 10 margin = 30
+  ok((await q(`select public.kiosk_app_need_pct(now(), now()+interval '1 hour', '00:00','23:59') n`))[0].n===30,'need 30% for 1 h awake');
+  ok((await q(`select public.kiosk_app_set_power('123456','app-g1','') r`))[0].r.ok===true && (await q(`select power_windows is null ok from kiosk_app_devices where device_id='app-g1'`))[0].ok,'clear generator hours = grid power');
+}
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}

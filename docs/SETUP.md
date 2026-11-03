@@ -75,6 +75,18 @@ If it says *"there are already some accounts on the device"*, an account was add
 - On your phone open **RSR Tablets** (`https://seafordprojects-bit.github.io/rsr-kiosk-app/tablets.html`),
   enter the admin passcode, and see the tablet **Online** with its battery.
 
+## 7b. Carmen only (generator power)
+
+On the RSR Tablets page, for **Carmen kiosk**:
+1. **Set schedule** -> `06:45-22:30` (screen on 15 min before the first 7:00 AM punch).
+2. **Generator hours** -> `08:00-11:30,13:00-16:30,18:00-21:00+24:00`.
+   `+24:00` means overtime MAY run until 24:00: from 9 PM the tablet on battery is normal (no "not charging"
+   alerts), you are only warned if the battery may run out before 8 AM.
+
+Then "not charging" alerts only come while the generator should be running (a real charger/cable problem).
+During breaks and at night you get a message only if the battery may run out before the generator is back.
+Mandaue (grid power): leave Generator hours empty.
+
 ## 8. Hidden settings on the tablet
 
 Tap the **top-right corner 5 times quickly** (within 3 seconds), then enter the exit passcode.

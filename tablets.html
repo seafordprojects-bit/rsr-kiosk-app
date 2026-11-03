@@ -130,6 +130,7 @@ function render(rows) {
             : '-'}</div>
         <div class="stat"><b>Battery temp</b>${t.battery_temp == null ? '-' : '<span style="color:' + (t.battery_temp >= 45 ? 'var(--bad)' : t.battery_temp >= 40 ? 'var(--warn)' : 'inherit') + '">' + esc(t.battery_temp) + ' &deg;C</span>'}</div>
         <div class="stat"><b>Last outage</b>${t.last_outage ? esc(t.last_outage.minutes) + ' min, ' + esc(t.last_outage.reason) + '<br><span class="mute">' + hhmm(t.last_outage.reported_at) + '</span>' : 'none'}</div>
+        <div class="stat"><b>Power</b>${t.power_windows ? 'Generator ' + esc(t.power_windows).replace(/,/g, ', ') : 'Grid (always on)'}</div>
         <div class="stat"><b>App build</b>${esc(t.app_version)}</div>
       </div>
       <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>
@@ -140,6 +141,7 @@ function render(rows) {
         <button onclick="send('${id}','screen_on')">Screen on</button>
         <button onclick="send('${id}','screen_off','','Turn the screen off now?')">Screen off</button>
         <button onclick="askSchedule('${id}','${esc(t.sched_on || '05:30')}','${esc(t.sched_off || '22:30')}')">Set schedule</button>
+        <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
         <button onclick="send('${id}','open_settings','','Open the settings screen on the tablet (no passcode needed for 10 minutes)?')">Open settings</button>
         <button class="danger" onclick="send('${id}','restart','','Restart the tablet now? Workers cannot punch for about 1 minute.')">Restart tablet</button>
       </div>
@@ -156,6 +158,14 @@ async function send(device, cmd, arg, confirmText) {
     show('Sent "' + cmd + '". The tablet picks it up within about 1 minute.', 'ok');
     load();
   } catch (e) { show('Not sent: ' + e.message, 'err'); }
+}
+
+function askPower(device, cur) {
+  const v = prompt('Generator hours for this tablet (Manila time), e.g.\n08:00-11:30,13:00-16:30,18:00-21:00+24:00\n(+24:00 = overtime may run until 24:00)\n\nCharging alerts then only apply while the generator should run; during breaks/night you are warned only if the battery may run out.\nLeave EMPTY for normal grid power.', cur || '08:00-11:30,13:00-16:30,18:00-21:00+24:00');
+  if (v == null) return;
+  rpc('kiosk_app_set_power', { p_passcode: passcode, p_device: device, p_windows: v.trim() })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show('Generator hours saved.', 'ok'); load(); } })
+    .catch(e => show('Not saved: ' + e.message, 'err'));
 }
 
 function askSchedule(device, on, off) {

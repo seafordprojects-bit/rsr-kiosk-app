@@ -15,6 +15,9 @@
 --        - OFFLINE: no report for 10 min (6 AM - 10 PM, while the screen schedule has it awake),
 --          with the likely reason; reminder every hour; "back online" with what the tablet reported
 --        - HOT: battery 45 C or more
+--        - GENERATOR (Carmen): with generator hours set, NOT CHARGING is only judged while the generator
+--          should run (from 20 min after its start); during breaks, night and optional overtime ("+24:00")
+--          only "may run out before the generator is back" and 10% CRITICAL
 --  UPGRADE: this whole file is safe to run again over an older version (adds columns, replaces functions).
 --        - tablet restarted / app updated / maintenance opened / update failed
 --      It reuses kiosk_alert_send (kiosk-alerts.sql). The older "tablet silent" alert (30 min, from the
@@ -75,6 +78,10 @@ alter table public.kiosk_app_devices add column if not exists last_outage       
 alter table public.kiosk_app_devices add column if not exists offline_alerted_at timestamptz;
 alter table public.kiosk_app_devices add column if not exists offline_first_at   timestamptz;
 alter table public.kiosk_app_devices add column if not exists hot_alerted        boolean not null default false;
+-- Generator hours (Carmen runs on a generator; 2026-11-03). Null = normal grid power, always on.
+-- Format "08:00-11:30,13:00-16:30,18:00-21:00" (Manila time). Set on the Tablets page.
+alter table public.kiosk_app_devices add column if not exists power_windows      text;
+alter table public.kiosk_app_devices add column if not exists risk_alerted_for   timestamptz;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -196,7 +203,7 @@ begin
            'page_ok', k.page_ok, 'page_url', k.page_url, 'sched_on', k.sched_on, 'sched_off', k.sched_off,
            'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes',
            'wifi', k.wifi, 'internet', k.internet, 'wifi_signal', k.wifi_signal,
-           'battery_temp', k.battery_temp, 'last_outage', k.last_outage,
+           'battery_temp', k.battery_temp, 'last_outage', k.last_outage, 'power_windows', k.power_windows,
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
            'pending', (k.cmd_id is not null and k.cmd_id > coalesce(k.cmd_done_id,0) and k.cmd_at > now() - interval '30 minutes'),
            'events', (select coalesce(jsonb_agg(jsonb_build_object('event', e.event, 'at', e.at) order by e.at desc), '[]'::jsonb)
@@ -208,18 +215,6 @@ begin
 end $$;
 revoke all on function public.kiosk_app_list(text) from public;
 grant execute on function public.kiosk_app_list(text) to anon, authenticated;
-
--- STEP 4b - RSR Admin dashboard: battery/charging banner. Read-only, no passcode (same as kiosk_health,
--- which the dashboard already reads with the public key): only names, battery % and charging state.
-create or replace function public.kiosk_app_status()
-returns jsonb language sql stable security definer set search_path = public as $$
-  select coalesce(jsonb_agg(jsonb_build_object(
-           'device_id', k.device_id, 'name', k.name, 'battery', k.battery, 'charging', k.charging,
-           'last_seen', k.last_seen, 'unplugged_since', k.unplugged_since) order by k.name), '[]'::jsonb)
-    from public.kiosk_app_devices k
-$$;
-revoke all on function public.kiosk_app_status() from public;
-grant execute on function public.kiosk_app_status() to anon, authenticated;
 
 -- STEP 5 - office page: send a command (admin passcode)
 create or replace function public.kiosk_app_command(p_passcode text, p_device text, p_cmd text, p_arg text default '')
@@ -267,6 +262,132 @@ returns integer language sql immutable as $$
 $$;
 revoke all on function public.kiosk_app_hhmm(text) from public, anon, authenticated;
 
+-- STEP 6c - generator-hours helpers (Manila time)
+-- Generator state at minute-of-day p_min. Window text: "08:00-11:30,13:00-16:30,18:00-21:00+24:00"
+-- ("+24:00" = overtime: the generator MAY run until 24:00). Returns:
+--   'on'       generator should be running (15 min after its start, until 5 min before its stop)
+--   'grace'    first 15 / last 5 min of a run - starting late or stopping early is normal, judge nothing
+--   'overtime' inside the optional overtime part - on battery is normal, only "may run out" applies
+--   'off'      generator off (break, night)
+-- No windows (grid power) = always 'on'.
+create or replace function public.kiosk_app_power_state(p_windows text, p_min int)
+returns text language plpgsql immutable as $$
+declare w text; a int; b int; x int; main text;
+begin
+  if coalesce(btrim(p_windows), '') = '' then return 'on'; end if;
+  foreach w in array string_to_array(p_windows, ',') loop
+    main := split_part(btrim(w), '+', 1);
+    a := public.kiosk_app_hhmm(split_part(main, '-', 1));
+    b := case when split_part(main, '-', 2) = '24:00' then 1440 else public.kiosk_app_hhmm(split_part(main, '-', 2)) end;
+    x := case when split_part(btrim(w), '+', 2) = '24:00' then 1440 else public.kiosk_app_hhmm(nullif(split_part(btrim(w), '+', 2), '')) end;
+    continue when a is null or b is null;
+    if p_min >= a + 15 and p_min < b - 5 then return 'on'; end if;
+    if p_min >= a and p_min < b then return 'grace'; end if;
+    if x is not null and p_min >= b and p_min < x then return 'overtime'; end if;
+  end loop;
+  return 'off';
+end $$;
+
+create or replace function public.kiosk_app_power_on(p_windows text, p_min int)
+returns boolean language sql immutable as $$
+  select public.kiosk_app_power_state(p_windows, p_min) = 'on'
+$$;
+
+-- Next generator START after p_now (today or tomorrow). Null when there are no windows.
+create or replace function public.kiosk_app_next_power(p_windows text, p_now timestamptz)
+returns timestamptz language plpgsql stable as $$
+declare w text; a int; d date := (p_now at time zone 'Asia/Manila')::date; best timestamptz; t timestamptz; k int;
+begin
+  if coalesce(btrim(p_windows), '') = '' then return null; end if;
+  for k in 0..1 loop
+    foreach w in array string_to_array(p_windows, ',') loop
+      a := public.kiosk_app_hhmm(split_part(btrim(w), '-', 1));
+      continue when a is null;
+      t := ((d + k)::timestamp + make_interval(mins => a)) at time zone 'Asia/Manila';
+      if t > p_now and (best is null or t < best) then best := t; end if;
+    end loop;
+  end loop;
+  return best;
+end $$;
+
+-- Battery % needed from p_from to p_to: about 20%/hour with the screen on (camera preview runs all
+-- the time), 3%/hour with the screen off by the schedule, plus 10% margin. Rough, on the safe side.
+create or replace function public.kiosk_app_need_pct(p_from timestamptz, p_to timestamptz, p_on text, p_off text)
+returns integer language plpgsql stable as $$
+declare t timestamptz := p_from; m int; v_on int := public.kiosk_app_hhmm(p_on); v_off int := public.kiosk_app_hhmm(p_off);
+        awake boolean; need numeric := 10; n int := 0;
+begin
+  if p_to is null then return null; end if;
+  while t < p_to and n < 200 loop
+    m := extract(hour from (t at time zone 'Asia/Manila'))*60 + extract(minute from (t at time zone 'Asia/Manila'));
+    awake := case when v_on is null or v_off is null or v_on = v_off then true
+                  when v_on < v_off then m >= v_on and m < v_off
+                  else m >= v_on or m < v_off end;
+    need := need + case when awake then 5 else 0.75 end;   -- per 15 minutes
+    t := t + interval '15 minutes'; n := n + 1;
+  end loop;
+  return ceil(need)::int;
+end $$;
+revoke all on function public.kiosk_app_power_on(text, int) from public, anon, authenticated;
+revoke all on function public.kiosk_app_power_state(text, int) from public, anon, authenticated;
+revoke all on function public.kiosk_app_next_power(text, timestamptz) from public, anon, authenticated;
+revoke all on function public.kiosk_app_need_pct(timestamptz, timestamptz, text, text) from public, anon, authenticated;
+
+-- STEP 5b - office page: set a tablet's generator hours (admin passcode). '' = normal grid power.
+create or replace function public.kiosk_app_set_power(p_passcode text, p_device text, p_windows text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare v text := regexp_replace(coalesce(p_windows,''), '\s', '', 'g'); w text; a int; b int; x int; prev int := -1;
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  if v <> '' then
+    if v !~ '^[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}(\+[0-9]{2}:[0-9]{2})?(,[0-9]{2}:[0-9]{2}-[0-9]{2}:[0-9]{2}(\+[0-9]{2}:[0-9]{2})?){0,5}$' then
+      return jsonb_build_object('error', 'use the form 08:00-11:30,13:00-16:30,18:00-21:00+24:00 (+24:00 = overtime may run until 24:00)');
+    end if;
+    foreach w in array string_to_array(v, ',') loop
+      a := public.kiosk_app_hhmm(split_part(split_part(w, '+', 1), '-', 1));
+      b := case when split_part(split_part(w, '+', 1), '-', 2) = '24:00' then 1440 else public.kiosk_app_hhmm(split_part(split_part(w, '+', 1), '-', 2)) end;
+      x := case when split_part(w, '+', 2) = '' then b when split_part(w, '+', 2) = '24:00' then 1440 else public.kiosk_app_hhmm(split_part(w, '+', 2)) end;
+      if a is null or b is null or x is null or b - a < 30 or x < b or a < prev then
+        return jsonb_build_object('error', 'each period must be start-end (at least 30 min), in order, within one day (end 24:00 allowed): ' || w);
+      end if;
+      prev := x;
+    end loop;
+  end if;
+  update public.kiosk_app_devices k set power_windows = nullif(v, ''), risk_alerted_for = null where k.device_id = p_device;
+  if not found then return jsonb_build_object('error', 'tablet not found'); end if;
+  insert into public.kiosk_app_events (device_id, event, notified)
+  values (p_device, 'office: generator hours ' || coalesce(nullif(v,''), 'none (grid power)'), true);
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_set_power(text, text, text) from public;
+grant execute on function public.kiosk_app_set_power(text, text, text) to anon, authenticated;
+
+-- STEP 6d - RSR Admin dashboard: battery/charging banner. Read-only, no passcode (same as kiosk_health,
+-- which the dashboard already reads with the public key): names, battery %, charging, and whether the
+-- generator should be on (Carmen) so a break or the night is not shown as a problem.
+create or replace function public.kiosk_app_status()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(x.j order by x.nm), '[]'::jsonb) from (
+    select k.name as nm, jsonb_build_object(
+           'device_id', k.device_id, 'name', k.name, 'battery', k.battery, 'charging', k.charging,
+           'last_seen', k.last_seen, 'unplugged_since', k.unplugged_since,
+           'generator', k.power_windows is not null,
+           'power_state', st.state,
+           'power_expected', st.state = 'on',
+           'power_back_at', public.kiosk_app_next_power(k.power_windows, now()),
+           'may_run_out', case when k.power_windows is not null and k.charging is false and k.battery is not null
+                                    and st.state in ('off', 'overtime')
+                               then k.battery < public.kiosk_app_need_pct(now(), public.kiosk_app_next_power(k.power_windows, now()), k.sched_on, k.sched_off)
+                               else false end) as j
+      from public.kiosk_app_devices k
+      cross join lateral (select public.kiosk_app_power_state(k.power_windows,
+            (extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila')))::int) as state) st) x
+$$;
+revoke all on function public.kiosk_app_status() from public;
+grant execute on function public.kiosk_app_status() to anon, authenticated;
+
 -- STEP 6 - Telegram watcher (every 5 min). Server-side only; not callable with the anon key.
 create or replace function public.kiosk_app_tick()
 returns void language plpgsql volatile security definer set search_path = public as $$
@@ -282,6 +403,11 @@ declare
   v_off   int;
   v_awake boolean;
   v_why   text;
+  v_win   boolean;   -- tablet has generator hours
+  v_pwr   boolean;   -- power expected right now
+  v_next  timestamptz;
+  v_need  int;
+  v_state text;
 begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
 
@@ -336,13 +462,21 @@ begin
       update public.kiosk_app_devices set hot_alerted = false where device_id = r.device_id;
     end if;
 
-    -- NOT CHARGING: first alert after 5 min, then a reminder with the current battery %
-    -- every 30 min (every 2 h at night, 10 PM - 6 AM) until the charger is back.
-    if r.unplugged_since is not null and r.unplugged_since < now() - interval '5 minutes'
+    v_win := r.power_windows is not null;
+    v_state := public.kiosk_app_power_state(r.power_windows, v_min);
+    -- judged "on" only after 5 min of 'on' (first NOT CHARGING about 20 min after a generator start)
+    v_pwr := v_state = 'on' and public.kiosk_app_power_state(r.power_windows, greatest(v_min - 5, 0)) = 'on';
+
+    -- NOT CHARGING (power expected): first alert after 5 min, then a reminder with the battery %
+    -- every 30 min (every 2 h at night for grid-power tablets) until the charger is back.
+    -- A generator tablet (Carmen) is only judged while the generator should be running.
+    if v_pwr and r.unplugged_since is not null and r.unplugged_since < now() - interval '5 minutes'
        and (r.unplugged_alerted_at is null
-            or r.unplugged_alerted_at < now() - case when v_work then interval '30 minutes' else interval '2 hours' end) then
-      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is NOT CHARGING for '
-              || public.kiosk_app_dur(now() - r.unplugged_since) || '. Battery '
+            or r.unplugged_alerted_at < now() - case when v_work or v_win then interval '30 minutes' else interval '2 hours' end) then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is NOT CHARGING'
+              || case when v_win then ' although the generator should be ON (check charger, cable, plug)' else '' end
+              || case when v_win then '' else ' for ' || public.kiosk_app_dur(now() - r.unplugged_since) end
+              || '. Battery '
               || coalesce(r.battery::text,'?') || '%. Please plug in the charger.');
       update public.kiosk_app_devices set unplugged_alerted = true, unplugged_alerted_at = now()
        where device_id = r.device_id;
@@ -353,13 +487,33 @@ begin
        where device_id = r.device_id;
     end if;
 
+    -- GENERATOR OFF (break / night) on battery: normal, no alert - UNLESS the battery will not last until
+    -- the generator is back. One warning per power-off period.
+    if v_win and v_state in ('off', 'overtime') and r.charging is false and r.battery is not null then
+      v_next := public.kiosk_app_next_power(r.power_windows, now());
+      v_need := public.kiosk_app_need_pct(now(), v_next, r.sched_on, r.sched_off);
+      if v_next is not null and r.battery < v_need and r.risk_alerted_for is distinct from v_next then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' on battery (generator off): ' || r.battery
+                || '% now. Generator back at ' || to_char(v_next at time zone 'Asia/Manila', 'HH12:MI AM')
+                || ' - it may RUN OUT before then (needs about ' || v_need || '%). Plug it into a power bank.');
+        update public.kiosk_app_devices set risk_alerted_for = v_next where device_id = r.device_id;
+      end if;
+    end if;
+
     -- BATTERY DROPPING while not charging: one message each time it crosses 50%, 30%, 20%, 10%
-    -- (sent even inside a reminder gap, so a fast drop is never missed).
+    -- (sent even inside a reminder gap, so a fast drop is never missed). With the generator off only
+    -- the 10% CRITICAL step is sent (the run-out warning above covers the rest).
     if r.charging is false and r.battery is not null then
       if r.battery <= 10 and r.batt_step > 10 then
         perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery CRITICAL ' || r.battery
                 || '% - it will switch off soon. Plug in NOW.');
         update public.kiosk_app_devices set batt_step = 10, low_batt_alerted = true where device_id = r.device_id;
+      elsif not v_pwr then
+        -- generator off: keep the step in line with the battery (never 10, so CRITICAL still fires),
+        -- so no old step message pops out when the generator comes back
+        update public.kiosk_app_devices
+           set batt_step = case when r.battery <= 20 then 20 when r.battery <= 30 then 30 when r.battery <= 50 then 50 else 100 end
+         where device_id = r.device_id and batt_step > 10;
       elsif r.battery <= 20 and r.batt_step > 20 then
         perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery LOW ' || r.battery || '% and NOT charging.');
         update public.kiosk_app_devices set batt_step = 20, low_batt_alerted = true where device_id = r.device_id;
@@ -370,8 +524,9 @@ begin
         perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery ' || r.battery || '% and NOT charging.');
         update public.kiosk_app_devices set batt_step = 50 where device_id = r.device_id;
       end if;
-    elsif r.charging is true and (r.batt_step < 100 or r.low_batt_alerted) then
-      update public.kiosk_app_devices set batt_step = 100, low_batt_alerted = false where device_id = r.device_id;
+    elsif r.charging is true and (r.batt_step < 100 or r.low_batt_alerted or r.risk_alerted_for is not null) then
+      update public.kiosk_app_devices set batt_step = 100, low_batt_alerted = false, risk_alerted_for = null
+       where device_id = r.device_id;
     end if;
   end loop;
 
