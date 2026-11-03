@@ -125,6 +125,11 @@ function render(rows) {
         <div class="stat"><b>Kiosk page</b>${t.page_ok === false ? '<span style="color:var(--bad)">Not loading</span>' : 'OK'}</div>
         <div class="stat"><b>Lock</b>${t.device_owner ? 'Full lock' : '<span style="color:var(--warn)">Pinning only</span>'}${t.maintenance ? ' <span style="color:var(--warn)">(maintenance)</span>' : ''}</div>
         <div class="stat"><b>Screen schedule</b>${sched}</div>
+        <div class="stat"><b>Wi-Fi</b>${t.wifi === false ? '<span style="color:var(--bad)">Not connected</span>'
+            : t.wifi ? ('Signal ' + (t.wifi_signal == null ? '?' : esc(t.wifi_signal)) + '/4' + (t.internet === false ? ' <span style="color:var(--bad)">(no internet)</span>' : ''))
+            : '-'}</div>
+        <div class="stat"><b>Battery temp</b>${t.battery_temp == null ? '-' : '<span style="color:' + (t.battery_temp >= 45 ? 'var(--bad)' : t.battery_temp >= 40 ? 'var(--warn)' : 'inherit') + '">' + esc(t.battery_temp) + ' &deg;C</span>'}</div>
+        <div class="stat"><b>Last outage</b>${t.last_outage ? esc(t.last_outage.minutes) + ' min, ' + esc(t.last_outage.reason) + '<br><span class="mute">' + hhmm(t.last_outage.reported_at) + '</span>' : 'none'}</div>
         <div class="stat"><b>App build</b>${esc(t.app_version)}</div>
       </div>
       <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>

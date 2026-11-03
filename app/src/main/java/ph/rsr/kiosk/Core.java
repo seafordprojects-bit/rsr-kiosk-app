@@ -40,6 +40,7 @@ final class Core {
 
     private final Context ctx;
     private final Prefs prefs;
+    private final NetState net;
     private final Handler bg;
     private final Handler main = new Handler(Looper.getMainLooper());
     private WeakReference<Host> host = new WeakReference<>(null);
@@ -71,6 +72,7 @@ final class Core {
     private Core(Context c) {
         ctx = c;
         prefs = new Prefs(c);
+        net = new NetState(c);
         HandlerThread t = new HandlerThread("rsr-core");
         t.start();
         bg = new Handler(t.getLooper());
@@ -120,7 +122,12 @@ final class Core {
                 int plug = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
                 if (lvl >= 0 && sc > 0) p.put("battery", Math.round(lvl * 100f / sc));
                 p.put("charging", plug != 0);
+                int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);   // tenths of a degree C
+                if (temp != Integer.MIN_VALUE && temp > -200 && temp < 1000) p.put("battery_temp", temp / 10.0);
             }
+            net.addTo(p);
+            JSONObject outage = net.pendingOutage();
+            if (outage != null) p.put("outage", outage);
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
             p.put("screen_on", pm != null && pm.isInteractive());
             p.put("device_owner", Policy.isOwner(ctx));
@@ -137,7 +144,14 @@ final class Core {
             if (ev != null) p.put("event", ev);
 
             String body = new JSONObject().put("p", p).toString();
-            String resp = Net.rpc("kiosk_app_beat", body);
+            String resp;
+            try {
+                resp = Net.rpc("kiosk_app_beat", body);
+            } catch (Exception e) {
+                net.beatFailed();
+                throw e;
+            }
+            net.beatOk();
             if (ev != null && ev.equals(pendingEvent)) pendingEvent = null;
             prefs.setLastBeatStatus("ok " + android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis()));
 

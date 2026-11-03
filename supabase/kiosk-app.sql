@@ -12,9 +12,14 @@
 --        - NOT CHARGING after 5 min, with battery %; reminder every 30 min (2 h at night) until plugged in
 --        - battery dropping while not charging: 50%, 30%, 20% (LOW), 10% (CRITICAL)
 --        - charging again, with battery %
+--        - OFFLINE: no report for 10 min (6 AM - 10 PM, while the screen schedule has it awake),
+--          with the likely reason; reminder every hour; "back online" with what the tablet reported
+--        - HOT: battery 45 C or more
+--  UPGRADE: this whole file is safe to run again over an older version (adds columns, replaces functions).
 --        - tablet restarted / app updated / maintenance opened / update failed
---      It reuses kiosk_alert_send (kiosk-alerts.sql). The existing "tablet went silent" alert
---      stays as it is, so there is no double offline alert.
+--      It reuses kiosk_alert_send (kiosk-alerts.sql). The older "tablet silent" alert (30 min, from the
+--      kiosk page, kiosk-alerts.sql) is left untouched on purpose (owner informed 2026-11-03): a long
+--      outage gives the app's OFFLINE at 10 min and that older message at 30 min.
 --
 --  ADDITIVE + IDEMPOTENT. Touches no existing table, function or cron job. Free-tier friendly.
 --  Rollback: kiosk-app-rollback.sql. ASCII only (safe to paste from Windows).
@@ -61,6 +66,15 @@ revoke all on public.kiosk_app_devices from anon, authenticated;
 -- not-charging reminders + battery-drop steps (2026-10-28)
 alter table public.kiosk_app_devices add column if not exists unplugged_alerted_at timestamptz;
 alter table public.kiosk_app_devices add column if not exists batt_step integer not null default 100;
+-- Wi-Fi / offline / heat (2026-11-03)
+alter table public.kiosk_app_devices add column if not exists wifi               boolean;
+alter table public.kiosk_app_devices add column if not exists internet           boolean;
+alter table public.kiosk_app_devices add column if not exists wifi_signal        integer;
+alter table public.kiosk_app_devices add column if not exists battery_temp       numeric(4,1);
+alter table public.kiosk_app_devices add column if not exists last_outage        jsonb;
+alter table public.kiosk_app_devices add column if not exists offline_alerted_at timestamptz;
+alter table public.kiosk_app_devices add column if not exists offline_first_at   timestamptz;
+alter table public.kiosk_app_devices add column if not exists hot_alerted        boolean not null default false;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -82,6 +96,8 @@ declare
   v_id   text := btrim(coalesce(p->>'device_id',''));
   v_chg  boolean := (p->>'charging')::boolean;
   v_ev   text := left(btrim(coalesce(p->>'event','')), 120);
+  v_out  jsonb := case when jsonb_typeof(p->'outage') = 'object' then p->'outage' end;
+  v_otxt text;
   d      public.kiosk_app_devices%rowtype;
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
@@ -108,6 +124,10 @@ begin
     page_ok         = (p->>'page_ok')::boolean,
     sched_on        = case when p->>'sched_on'  ~ '^[0-2][0-9]:[0-5][0-9]$' then p->>'sched_on'  end,
     sched_off       = case when p->>'sched_off' ~ '^[0-2][0-9]:[0-5][0-9]$' then p->>'sched_off' end,
+    wifi            = (p->>'wifi')::boolean,
+    internet        = (p->>'internet')::boolean,
+    wifi_signal     = case when p->>'wifi_signal' ~ '^[0-4]$' then (p->>'wifi_signal')::integer end,
+    battery_temp    = case when p->>'battery_temp' ~ '^-?[0-9]{1,2}(\.[0-9])?$' then (p->>'battery_temp')::numeric end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -120,6 +140,21 @@ begin
      and (select count(*) from public.kiosk_app_events x
            where x.device_id = v_id and x.at > now() - interval '1 hour') < 20 then
     insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
+  end if;
+
+  -- The tablet just came back and tells us how long it was cut off, and why (no Wi-Fi, no internet,
+  -- server not reachable). Kept for the "back online" message and the Tablets page.
+  if v_out is not null and v_out->>'reason' in ('Wi-Fi off / not connected', 'Wi-Fi connected but no internet',
+                                               'internet OK but server not reachable')
+     and v_out->>'minutes' ~ '^[0-9]{1,5}$' then
+    v_otxt := 'was offline ' || (v_out->>'minutes') || ' min: ' || (v_out->>'reason');
+    update public.kiosk_app_devices k set last_outage = jsonb_build_object(
+             'minutes', (v_out->>'minutes')::integer, 'reason', v_out->>'reason', 'reported_at', now())
+     where k.device_id = v_id;
+    if not exists (select 1 from public.kiosk_app_events x
+                    where x.device_id = v_id and x.event = v_otxt and x.at > now() - interval '10 minutes') then
+      insert into public.kiosk_app_events (device_id, event, notified) values (v_id, v_otxt, true);
+    end if;
   end if;
 
   if d.cmd_id is not null and d.cmd_id > coalesce(d.cmd_done_id, 0)
@@ -160,6 +195,8 @@ begin
            'device_owner', k.device_owner, 'maintenance', k.maintenance,
            'page_ok', k.page_ok, 'page_url', k.page_url, 'sched_on', k.sched_on, 'sched_off', k.sched_off,
            'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes',
+           'wifi', k.wifi, 'internet', k.internet, 'wifi_signal', k.wifi_signal,
+           'battery_temp', k.battery_temp, 'last_outage', k.last_outage,
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
            'pending', (k.cmd_id is not null and k.cmd_id > coalesce(k.cmd_done_id,0) and k.cmd_at > now() - interval '30 minutes'),
            'events', (select coalesce(jsonb_agg(jsonb_build_object('event', e.event, 'at', e.at) order by e.at desc), '[]'::jsonb)
@@ -222,6 +259,14 @@ returns text language sql immutable as $$
 $$;
 revoke all on function public.kiosk_app_dur(interval) from public, anon, authenticated;
 
+-- STEP 6b - "05:30" -> 330 minutes (null if not a time)
+create or replace function public.kiosk_app_hhmm(p text)
+returns integer language sql immutable as $$
+  select case when p ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+              then split_part(p, ':', 1)::int * 60 + split_part(p, ':', 2)::int end
+$$;
+revoke all on function public.kiosk_app_hhmm(text) from public, anon, authenticated;
+
 -- STEP 6 - Telegram watcher (every 5 min). Server-side only; not callable with the anon key.
 create or replace function public.kiosk_app_tick()
 returns void language plpgsql volatile security definer set search_path = public as $$
@@ -233,12 +278,63 @@ declare
                + extract(minute from (now() at time zone 'Asia/Manila'));
   v_work  boolean;
   v_name  text;
+  v_on    int;
+  v_off   int;
+  v_awake boolean;
+  v_why   text;
 begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
 
   for r in select * from public.kiosk_app_devices loop
     v_name := coalesce(nullif(r.name,''), r.device_id);
-    continue when r.last_seen < now() - interval '10 minutes';   -- silent tablet: the existing alert handles it
+
+    -- OFFLINE: no report for 10 min. Only 6 AM - 10 PM, only while the tablet's own screen schedule
+    -- has it awake (plus 15 min after its ON time), and only for a tablet seen in the last 24 h
+    -- (a retired tablet is not an alarm). Reminder every 60 min while it stays offline.
+    v_on  := public.kiosk_app_hhmm(r.sched_on);
+    v_off := public.kiosk_app_hhmm(r.sched_off);
+    v_awake := case when v_on is null or v_off is null or v_on = v_off then true
+                    when v_on < v_off then v_min >= v_on + 15 and v_min < v_off
+                    else v_min >= v_on + 15 or v_min < v_off end;
+    if r.last_seen < now() - interval '10 minutes' then
+      if v_work and v_awake and r.last_seen > now() - interval '24 hours'
+         and (r.offline_alerted_at is null or r.offline_alerted_at < now() - interval '60 minutes') then
+        v_why := case when r.charging is false and coalesce(r.battery,100) <= 15
+                        then ' Last report: battery ' || r.battery || '% and NOT charging - the battery probably ran out.'
+                      when r.wifi is false then ' Last report: no Wi-Fi.'
+                      when coalesce(r.wifi_signal,4) <= 1 then ' Last report: weak Wi-Fi signal (' || r.wifi_signal || '/4).'
+                      else ' Possible: Wi-Fi/internet down, power cut, or tablet off.' end;
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is OFFLINE - no report for '
+                || public.kiosk_app_dur(now() - r.last_seen) || ' (since '
+                || to_char(r.last_seen at time zone 'Asia/Manila', 'HH12:MI AM') || ').' || v_why
+                || ' Punches are kept on the tablet and sync when it is back.');
+        update public.kiosk_app_devices
+           set offline_alerted_at = now(), offline_first_at = coalesce(offline_first_at, now())
+         where device_id = r.device_id;
+      end if;
+      continue;   -- nothing else can be judged from a silent tablet
+    end if;
+
+    -- BACK ONLINE after an offline alarm: one message, with the reason the tablet reported.
+    if r.offline_first_at is not null then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is back ONLINE.'
+              || case when r.last_outage is not null and (r.last_outage->>'reported_at')::timestamptz > now() - interval '30 minutes'
+                      then ' It was offline ' || public.kiosk_app_dur(((r.last_outage->>'minutes')::int || ' minutes')::interval)
+                           || ' - ' || (r.last_outage->>'reason') || '.'
+                      else '' end
+              || ' Battery ' || coalesce(r.battery::text,'?') || '%.');
+      -- keep offline_alerted_at: a tablet whose Wi-Fi keeps dropping gets at most one OFFLINE per hour
+      update public.kiosk_app_devices set offline_first_at = null where device_id = r.device_id;
+    end if;
+
+    -- HOT: battery 45 C or more (sun, charging in a closed box). Once; clears below 40 C.
+    if r.battery_temp is not null and r.battery_temp >= 45 and not r.hot_alerted then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is HOT - battery ' || r.battery_temp
+              || ' C. Move it out of the sun / give it air. Heat damages the battery.');
+      update public.kiosk_app_devices set hot_alerted = true where device_id = r.device_id;
+    elsif r.hot_alerted and coalesce(r.battery_temp, 0) < 40 then
+      update public.kiosk_app_devices set hot_alerted = false where device_id = r.device_id;
+    end if;
 
     -- NOT CHARGING: first alert after 5 min, then a reminder with the current battery %
     -- every 30 min (every 2 h at night, 10 PM - 6 AM) until the charger is back.

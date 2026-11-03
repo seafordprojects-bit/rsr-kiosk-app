@@ -28,6 +28,14 @@ On the laptop open `https://github.com/seafordprojects-bit/rsr-kiosk-app/release
 2. In the welcome setup: connect to the yard **Wi-Fi**.
 3. **Skip** the Google account and **skip** the Samsung account. No account must be added, otherwise step 5 fails.
 
+## 3b. Protect the battery (important for a tablet that is plugged in all day)
+
+1. **Settings > Battery > More battery settings > Protect battery: ON** (on some versions:
+   **Settings > Battery > Battery protection > Maximum 85%**).
+2. The tablet then stops charging at 85%. A battery kept at 100% all day in yard heat can swell within months.
+3. Use a proper 10-15 W charger and keep the tablet out of direct sun and with some air around it.
+   The app sends a Telegram alert if the battery reaches 45 C.
+
 ## 4. Turn on USB debugging
 
 1. **Settings > About tablet > Software information**. Tap **Build number** 7 times until it says

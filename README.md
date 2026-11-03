@@ -9,7 +9,7 @@ RSR-only Android kiosk browser for the Galaxy Tab kiosks. Replaces Fully Kiosk B
   Offline punching keeps working because the kiosk page's own offline mode is untouched.
 - Heartbeat every 60 s to Supabase (battery, charging, screen, build). Remote commands from the
   **RSR Tablets** page: reload, full reload, update, screen on/off, schedule, open settings, restart.
-- Telegram (RSR Kiosk Alerts): NOT CHARGING after 5 min with battery % (reminder every 30 min, 2 h at night), battery drop 50/30/20/10%, charging again, tablet restarted, app updated.
+- Telegram (RSR Kiosk Alerts): NOT CHARGING after 5 min with battery % (reminder every 30 min, 2 h at night), battery drop 50/30/20/10%, charging again, OFFLINE 10 min (6 AM-10 PM, with likely reason, hourly reminder) and back ONLINE with the reason the tablet reported (no Wi-Fi / no internet / server), battery HOT 45 C, tablet restarted, app updated.
 - Self-update from the latest GitHub Release, silent install.
 
 | Path | What |
