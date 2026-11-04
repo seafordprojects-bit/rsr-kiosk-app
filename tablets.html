@@ -139,7 +139,7 @@ function render(rows) {
         <div class="stat"><b>Battery use (measured)</b>${t.drain_on == null ? 'learning...' : esc(t.drain_on) + '%/h screen on' + (t.drain_off == null ? '' : ', ' + esc(t.drain_off) + '%/h off')}</div>
         <div class="stat"><b>App build</b>${esc(t.app_version)}</div>
         <div class="stat"><b>Kiosk page version</b>${t.page_version ? esc(t.page_version) : '<span class="mute">not reported yet</span>'}</div>
-        <div class="stat"><b>Last page error</b>${t.page_error ? '<span class="err">' + esc(t.page_error) + '</span><br><span class="mute">' + hhmm(t.page_error_at) + '</span>' : 'none'}</div>
+        <div class="stat"><b>Last page error</b>${t.page_error ? '<span class="err">' + esc(t.page_error) + '</span><br><span class="mute">' + hhmm(t.page_error_at) + ' (' + ago(t.page_error_at) + ')</span>' : 'none'}</div>
       </div>
       <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>
       <div class="btns">

@@ -349,6 +349,13 @@ r=(await q(`select public.kiosk_app_shot_get('123456','app-tk1') r`))[0].r; ok(r
 r=(await q(`select public.kiosk_app_shot_get('123456','app-none') r`))[0].r; ok(r.error==='no screenshot yet','no shot yet');
 L=(await q(`select public.kiosk_app_list('123456') r`))[0].r; const LT=L.find(x=>x.device_id==='app-tk1');
 ok(LT.page_version==='v2026-10-16d' && !!LT.page_error && !!LT.shot_at && !('jpeg' in LT),'list shows version, error, shot time (never the picture itself)');
+r=await beat({device_id:'app-tk1',token:t1.token,battery:48,page_error:'later error',page_error_at:'2026-02-31T25:00:00Z'});
+ok(!r.error && (await q(`select battery from kiosk_app_devices where device_id='app-tk1'`))[0].battery===48,'impossible error time never breaks the heartbeat');
+ok((await q(`select page_error_at>now()-interval '1 minute' f from kiosk_app_devices where device_id='app-tk1'`))[0].f===true,'bad error time -> report time used');
+await beat({device_id:'app-tk1',token:t1.token,page_error:'future',page_error_at:'2099-01-01T00:00:00Z'});
+ok((await q(`select page_error_at<=now() f from kiosk_app_devices where device_id='app-tk1'`))[0].f===true,'error time never in the future');
+await q(`select public.kiosk_app_forget('123456','app-tk1')`);
+ok((await q(`select count(*)::int n from kiosk_app_shots where device_id='app-tk1'`))[0].n===0,'forget tablet also deletes its screenshot');
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}

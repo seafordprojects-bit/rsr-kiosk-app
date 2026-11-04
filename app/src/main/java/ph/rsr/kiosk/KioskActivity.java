@@ -195,8 +195,11 @@ public class KioskActivity extends Activity implements Core.Host {
             @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
                 if (m != null && m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR) {
-                    String src = m.sourceId() == null ? "" : m.sourceId().replaceAll("^.*/", "");
-                    pageError = String.valueOf(m.message()) + (src.isEmpty() ? "" : " (" + src + ":" + m.lineNumber() + ")");
+                    String msg = String.valueOf(m.message());
+                    // offline load failures (net::ERR_...) are normal on yard Wi-Fi and would hide real errors
+                    if (msg.contains("net::ERR_")) return false;
+                    String src = m.sourceId() == null ? "" : m.sourceId().replaceAll("[?#].*$", "").replaceAll("^.*/", "");
+                    pageError = redact(msg) + (src.isEmpty() ? "" : " (" + src + ":" + m.lineNumber() + ")");
                     pageErrorAt = System.currentTimeMillis();
                 }
                 return false;
@@ -293,28 +296,49 @@ public class KioskActivity extends Activity implements Core.Host {
         });
     }
 
+    /** Never send secrets to the office page: Telegram bot tokens, Supabase keys (JWT), URL query strings. */
+    static String redact(String s) {
+        return s.replaceAll("bot[0-9]+:[A-Za-z0-9_-]+", "bot***")
+                .replaceAll("eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+", "***")
+                .replaceAll("(https?://[^\\s?#]+)\\?[^\\s]*", "$1?***");
+    }
+
     @Override public String pageVersion() { return pageVersion; }
     @Override public String pageError() { return pageError; }
     @Override public long pageErrorAt() { return pageErrorAt; }
 
     // ---- screenshot for the office (Tablets page) --------------------------------------------
     // The camera picture is hidden while capturing (no worker faces on the server) and always put back.
-    private static final String HIDE_VIDEO = "(function(){try{document.querySelectorAll('video').forEach(function(v){"
+    // Everything that can show a face, a worker's name or a punch result: the camera, the after-punch photo
+    // card (#photo-overlay, 3 s), the punch message (#punch-msg) and any photo image. Hidden, then put back.
+    private static final String SHOT_HIDE_SEL = "video,canvas,#photo-overlay,#punch-msg,img[src^=\\\"data:\\\"],img[src^=\\\"blob:\\\"]";
+    private static final String HIDE_VIDEO = "(function(){try{document.querySelectorAll('" + SHOT_HIDE_SEL + "').forEach(function(v){"
             + "v.dataset.rsrVis=v.style.visibility||'';v.style.visibility='hidden';});}catch(e){}})()";
-    private static final String SHOW_VIDEO = "(function(){try{document.querySelectorAll('video').forEach(function(v){"
-            + "if(v.dataset.rsrVis!==undefined){v.style.visibility=v.dataset.rsrVis;delete v.dataset.rsrVis;}});}catch(e){}})()";
+    private static final String SHOW_VIDEO = "(function(){try{document.querySelectorAll('[data-rsr-vis]').forEach(function(v){"
+            + "v.style.visibility=v.dataset.rsrVis;delete v.dataset.rsrVis;});}catch(e){}})()";
+    /** Answer of takeScreenshot when a worker started using the kiosk during the capture. */
+    static final String SHOT_BUSY = "busy";
 
     /** Main thread. Captures what the kiosk screen shows; answers a base64 JPEG, or null on failure. */
     @Override
     public void takeScreenshot(java.util.function.Consumer<String> done) {
         if (web == null || shooting) { done.accept(null); return; }
         shooting = true;
+        final long touchAtStart = lastTouchAt;
         if (backlightLow) setBacklightLow(false);
-        // Lift the page's black idle cover first (nobody is mid-punch behind it), so the version and any
-        // error banner are on the picture. The page dims itself again on its own timer.
-        web.evaluateJavascript("(function(){try{if(typeof screenBlack!=='undefined'&&screenBlack&&typeof wakeScreen==='function')wakeScreen();}catch(e){}})()", null);
+        // Lift the page's black idle cover (or its dim layer) first, so the version and any error banner are
+        // on the picture. Same as a tap on an idle page; it dims itself again on its own timer.
+        web.evaluateJavascript("(function(){try{if(typeof screenBlack!=='undefined'&&screenBlack){if(typeof wakeScreen==='function')wakeScreen();}"
+                + "else if(typeof resetDimTimer==='function')resetDimTimer();}catch(e){}})()", null);
         web.evaluateJavascript(HIDE_VIDEO, null);
-        ui.postDelayed(() -> {   // let the page draw without the camera
+        ui.postDelayed(() -> {   // let the page draw without the hidden parts
+          if (web == null) { finishShot(null, done); return; }
+          // Checked again right before the capture: a worker who tapped meanwhile, or is entering a PIN,
+          // cancels it (same check as pageBusy).
+          web.evaluateJavascript("(function(){try{if(typeof curEmp!=='undefined'&&curEmp)return true;"
+                + "if(typeof pin!=='undefined'&&pin)return true;"
+                + "if(document.querySelector('.modal-bg.show'))return true;}catch(e){}return false;})()", busyNow -> {
+            if ("true".equals(busyNow) || lastTouchAt != touchAtStart) { finishShot(SHOT_BUSY, done); return; }
             try {
                 View d = getWindow().getDecorView();
                 int w = d.getWidth(), h = d.getHeight();
@@ -330,6 +354,7 @@ public class KioskActivity extends Activity implements Core.Host {
                 Log.w(TAG, "screenshot", t);
                 finishShot(null, done);
             }
+          });
         }, 800);
     }
 

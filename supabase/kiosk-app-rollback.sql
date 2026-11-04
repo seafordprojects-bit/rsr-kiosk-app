@@ -21,6 +21,7 @@ drop function if exists public.kiosk_app_beat(jsonb);
 drop function if exists public.kiosk_app_shot_put(text, text, text);
 drop function if exists public.kiosk_app_shot_get(text, text);
 drop table if exists public.kiosk_app_shots;
+drop function if exists public.kiosk_app_ts(text);
 drop table if exists public.kiosk_app_events;
 drop table if exists public.kiosk_app_devices;
 drop sequence if exists public.kiosk_app_cmd_seq;

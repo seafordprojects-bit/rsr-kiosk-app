@@ -367,7 +367,8 @@ final class Core {
             case "screenshot": {
                 if (prefs.inMaintenance()) { ack(id, "refused: settings are open (maintenance)"); break; }
                 // never while a worker is mid-punch: wait for 20 s without a touch, at most 2 min
-                if (!waitUntilSafe(20, 120)) { ack(id, "refused: kiosk in use - send again later"); break; }
+                if (!waitUntilSafe(20, 60)) { ack(id, "refused: kiosk in use - send again later"); break; }
+                if (prefs.inMaintenance()) { ack(id, "refused: settings are open (maintenance)"); break; }   // opened while waiting
                 if (host.get() == null) { ack(id, "failed: kiosk screen not running"); break; }
                 wakeScreen();   // PixelCopy needs the screen on and the kiosk in front
                 final String[] pic = {null};
@@ -378,6 +379,7 @@ final class Core {
                     hh.takeScreenshot(b -> { pic[0] = b; l.countDown(); });
                 }, 1500);
                 try { l.await(20, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+                if (KioskActivity.SHOT_BUSY.equals(pic[0])) { ack(id, "refused: kiosk in use - send again later"); break; }
                 if (pic[0] == null) { ack(id, "failed: could not capture the screen"); break; }
                 try {
                     JSONObject b = new JSONObject().put("p_device", prefs.deviceId()).put("p_token", prefs.token()).put("p_jpeg", pic[0]);

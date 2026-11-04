@@ -125,6 +125,17 @@ revoke all on public.kiosk_app_events from anon, authenticated;
 create sequence if not exists public.kiosk_app_cmd_seq;
 revoke all on sequence public.kiosk_app_cmd_seq from anon, authenticated;
 
+-- text -> timestamptz, or null when it is not a real UTC time (a bad value must never break the heartbeat)
+create or replace function public.kiosk_app_ts(p text)
+returns timestamptz language plpgsql immutable as $$
+begin
+  if p !~ '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' then return null; end if;
+  return p::timestamptz;
+exception when others then
+  return null;
+end $$;
+revoke all on function public.kiosk_app_ts(text) from public, anon, authenticated;
+
 -- STEP 2 - heartbeat from the app (anon). Returns the pending office command, if any.
 create or replace function public.kiosk_app_beat(p jsonb)
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
@@ -202,8 +213,7 @@ begin
     page_error      = case when btrim(coalesce(p->>'page_error','')) <> ''
                            then left(regexp_replace(p->>'page_error', '[<>]', '', 'g'), 300) else k.page_error end,
     page_error_at   = case when btrim(coalesce(p->>'page_error','')) <> ''
-                           then case when p->>'page_error_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9:]+)$'
-                                     then least((p->>'page_error_at')::timestamptz, now()) else now() end
+                           then coalesce(least(public.kiosk_app_ts(p->>'page_error_at'), now()), now())
                            else k.page_error_at end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
@@ -303,6 +313,7 @@ begin
   end if;
   delete from public.kiosk_app_devices k where k.device_id = p_device;
   if not found then return jsonb_build_object('error', 'tablet not found'); end if;
+  delete from public.kiosk_app_shots s where s.device_id = p_device;
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.kiosk_app_forget(text, text) from public;
@@ -370,7 +381,7 @@ end $$;
 revoke all on function public.kiosk_app_command(text, text, text, text) from public;
 grant execute on function public.kiosk_app_command(text, text, text, text) to anon, authenticated;
 
--- STEP 5b - screenshot of the kiosk screen (2026-11-04). The tablet uploads it with its secret; only the
+-- STEP 5c - screenshot of the kiosk screen (2026-11-04). The tablet uploads it with its secret; only the
 -- latest one per tablet is kept. The office reads it with the admin passcode. Never in kiosk_app_list (size).
 create or replace function public.kiosk_app_shot_put(p_device text, p_token text, p_jpeg text)
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
@@ -748,6 +759,7 @@ begin
   -- free the 20-tablet cap from UNNAMED ids that never finished setup and stopped a week ago. Named tablets
   -- (Carmen, Mandaue) are never deleted here, so a long shutdown keeps their generator hours and history.
   delete from public.kiosk_app_devices where coalesce(name, '') = '' and last_seen < now() - interval '7 days';
+  delete from public.kiosk_app_shots s where not exists (select 1 from public.kiosk_app_devices d where d.device_id = s.device_id);
 end $$;
 revoke all on function public.kiosk_app_tick() from public, anon, authenticated;
 
@@ -758,4 +770,10 @@ select cron.schedule('kiosk-app-tick', '*/5 * * * *', 'select public.kiosk_app_t
 -- STEP 8 - CHECK (read-only)
 select jobname, schedule, active from cron.job where jobname = 'kiosk-app-tick';   -- expect 1 row, active
 select public.kiosk_app_beat('{"device_id":"bad id"}'::jsonb);                       -- expect {}
-select count(*) as tablets from public.kiosk_app_devices;                            -- 0 until a tablet runs the app
+select count(*) as tablets,                                                          -- 0 until a tablet runs the app
+       to_regclass('public.kiosk_app_shots') is not null as shots_table,                 -- expect true
+       to_regprocedure('public.kiosk_app_shot_put(text,text,text)') is not null as shot_put,   -- expect true
+       to_regprocedure('public.kiosk_app_shot_get(text,text)') is not null as shot_get,        -- expect true
+       (select count(*) from information_schema.columns where table_schema = 'public'
+          and table_name = 'kiosk_app_devices' and column_name in ('page_version','page_error','page_error_at','shot_at')) as new_columns  -- expect 4
+  from public.kiosk_app_devices;

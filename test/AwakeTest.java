@@ -169,6 +169,19 @@ public class AwakeTest {
         ok(hide >= 0 && copy > hide, "the camera picture is hidden BEFORE the screen is captured (no worker faces)");
         ok(act.contains("SHOW_VIDEO") && body(act, "private void finishShot(").contains("SHOW_VIDEO"), "the camera picture is always put back, success or failure");
         ok(ts.contains("screenBlack"), "the black idle cover is lifted first, so the version and errors are visible");
+        int hs = act.indexOf("SHOT_HIDE_SEL =");
+        if (hs < 0) throw new AssertionError("SHOT_HIDE_SEL not found in KioskActivity.java");
+        String hideJs = act.substring(hs, act.indexOf('\n', hs));
+        ok(act.substring(act.indexOf("HIDE_VIDEO ="), act.indexOf("SHOW_VIDEO =")).contains("SHOT_HIDE_SEL"), "the hide script uses that list");
+        ok(hideJs.contains("#photo-overlay") && hideJs.contains("#punch-msg") && hideJs.contains("data:") && hideJs.contains("blob:"),
+                "the after-punch photo, the punch message and any photo image are hidden too (where faces/names really show)");
+        int busy = ts.indexOf("curEmp"), cp = ts.indexOf("PixelCopy.request");
+        ok(busy >= 0 && cp > busy && ts.contains("lastTouchAt"), "checked again right before capture: a worker who just tapped cancels it");
+        ok(shot.contains("SHOT_BUSY"), "a cancelled capture is reported as 'kiosk in use', not as a failure");
+        int m1 = shot.indexOf("inMaintenance()"), m2 = shot.indexOf("inMaintenance()", m1 + 1), w = shot.indexOf("waitUntilSafe(");
+        ok(m2 > w, "maintenance checked again after the wait (never pulls the kiosk over Settings)");
+        ok(shot.contains("waitUntilSafe(20, 60)"), "waits at most 60 s, so the heartbeat is not held up for minutes");
+        ok(act.contains("bot***") && act.contains("ERR_"), "page errors: bot token / keys redacted, network noise (net::ERR_) skipped");
 
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
