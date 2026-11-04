@@ -138,6 +138,15 @@ public class AwakeTest {
         ok(ka.contains("startForeground(") && ka.contains("FOREGROUND_SERVICE_TYPE_SPECIAL_USE"), "the service goes to the foreground with its type");
         ok(ka.contains("START_STICKY"), "Android restarts it if it is ever killed");
         ok(body(ka, "static void start(").contains("catch"), "a refused start never crashes the kiosk");
+        String st = body(ka, "static void start(");
+        ok(st.contains("running") && st.indexOf("running") < st.indexOf("startForegroundService"),
+                "already running: no new start (each start re-arms Android's 10 s must-go-foreground timer)");
+        ok(st.contains("keepAliveFailedAt") && st.indexOf("keepAliveFailedAt") < st.indexOf("startForegroundService"),
+                "after a failed go-foreground it is not started again for a day (no crash loop on a live kiosk)");
+        String gf = body(ka, "private void goForeground()");
+        ok(gf.contains("setKeepAliveFailedAt") && gf.indexOf("setKeepAliveFailedAt") < gf.lastIndexOf("startForeground("),
+                "a failure is saved BEFORE the plain fallback notification is tried");
+        ok(!ka.contains("getApplicationInfo().icon"), "small icon is a one-colour system icon, not the colour launcher icon");
         ok(body(core, "void start()").contains("KeepAlive.start("), "started with the app (every process start)");
         ok(body(act, "protected void onResume()").contains("KeepAlive.start("), "started again whenever the kiosk is in front (always allowed)");
         ok(Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/BootReceiver.java")).contains("KeepAlive.start("), "started after a restart / app update");

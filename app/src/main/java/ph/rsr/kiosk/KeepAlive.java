@@ -27,9 +27,19 @@ public class KeepAlive extends Service {
     private static final String CHANNEL = "rsr_keepalive";
     private static final int ID = 41;
 
+    /** True once the service is in the foreground; cleared when Android stops it. */
+    static volatile boolean running;
+    private static final long RETRY_AFTER_FAIL_MS = 24 * 3600_000L;
+
     /** Safe to call any time, from anywhere: a start Android refuses is logged, never a crash. */
     static void start(Context c) {
+        // Each start re-arms Android's "go foreground within 10 s" timer: never start what already runs.
+        if (running) return;
         try {
+            // It once failed to go foreground: Android then crashes the app, and the kiosk would relaunch and
+            // crash again every few seconds. Stay off for a day instead (the kiosk works as before without it).
+            long failed = new Prefs(c).keepAliveFailedAt();
+            if (failed > 0 && System.currentTimeMillis() - failed < RETRY_AFTER_FAIL_MS) return;
             Intent i = new Intent(c, KeepAlive.class);
             if (Build.VERSION.SDK_INT >= 26) c.startForegroundService(i); else c.startService(i);
         } catch (Exception e) {
@@ -50,6 +60,8 @@ public class KeepAlive extends Service {
     }
 
     private void goForeground() {
+        // No "already running" shortcut here: a start that slipped in must still be answered with startForeground
+        // (calling it again on a running service is harmless, skipping it would let Android crash the app).
         try {
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm != null && nm.getNotificationChannel(CHANNEL) == null) {
@@ -58,15 +70,32 @@ public class KeepAlive extends Service {
                 nm.createNotificationChannel(ch);
             }
             Notification n = new Notification.Builder(this, CHANNEL)
-                    .setSmallIcon(getApplicationInfo().icon)
+                    .setSmallIcon(android.R.drawable.stat_notify_sync)   // one-colour system icon
                     .setContentTitle("RSR Kiosk is running")
                     .setOngoing(true)
                     .build();
             if (Build.VERSION.SDK_INT >= 34) startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
             else startForeground(ID, n);
+            running = true;
         } catch (Exception e) {
             Log.w(TAG, "foreground refused", e);
+            new Prefs(this).setKeepAliveFailedAt(System.currentTimeMillis());   // before anything else can fail
+            try {   // last try with the plainest notification, so Android has no reason to crash the app
+                Notification plain = new Notification.Builder(this, CHANNEL)
+                        .setSmallIcon(android.R.drawable.stat_notify_sync).build();
+                startForeground(ID, plain);
+                running = true;
+            } catch (Exception e2) {
+                Log.w(TAG, "plain foreground refused too", e2);
+                stopSelf();
+            }
         }
+    }
+
+    @Override
+    public void onDestroy() {
+        running = false;
+        super.onDestroy();
     }
 
     @Override

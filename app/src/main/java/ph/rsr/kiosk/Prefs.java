@@ -45,6 +45,10 @@ final class Prefs {
     long lastCmdDone() { return sp.getLong("cmd_done", 0L); }
     void setLastCmdDone(long id) { sp.edit().putLong("cmd_done", id).commit(); }
 
+    /** Last time KeepAlive could not go to the foreground (0 = never). Saved at once: the system may crash us next. */
+    long keepAliveFailedAt() { return sp.getLong("ka_failed", 0L); }
+    void setKeepAliveFailedAt(long t) { sp.edit().putLong("ka_failed", t).commit(); }
+
     long maintenanceUntil() { return sp.getLong("maint_until", 0L); }
     void setMaintenanceUntil(long t) { sp.edit().putLong("maint_until", t).commit(); }
     boolean inMaintenance() { return System.currentTimeMillis() < maintenanceUntil(); }
