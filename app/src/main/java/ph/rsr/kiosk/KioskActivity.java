@@ -65,6 +65,11 @@ public class KioskActivity extends Activity implements Core.Host {
     private long firstCornerTap = 0;
     private ConnectivityManager.NetworkCallback netCb;
     private AlertDialog passDialog;
+    /** What the office sees on the Tablets page (read by the background heartbeat). */
+    private volatile String pageVersion = "";
+    private volatile String pageError = "";
+    private volatile long pageErrorAt = 0;
+    private boolean shooting = false;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -147,6 +152,7 @@ public class KioskActivity extends Activity implements Core.Host {
                 if (!mainFrameError) {
                     overlay.setVisibility(View.GONE);
                     readPageDeviceId();
+                    readPageVersion();
                 }
             }
 
@@ -184,6 +190,18 @@ public class KioskActivity extends Activity implements Core.Host {
         });
 
         web.setWebChromeClient(new WebChromeClient() {
+            /** The page's errors only (uncaught errors, failed loads, console.error): the latest one is
+             *  sent with the heartbeat so the office sees "what went wrong, when" without visiting the yard. */
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
+                if (m != null && m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR) {
+                    String src = m.sourceId() == null ? "" : m.sourceId().replaceAll("^.*/", "");
+                    pageError = String.valueOf(m.message()) + (src.isEmpty() ? "" : " (" + src + ":" + m.lineNumber() + ")");
+                    pageErrorAt = System.currentTimeMillis();
+                }
+                return false;
+            }
+
             @Override
             public void onPermissionRequest(PermissionRequest req) {
                 // Camera (and mic) only, and only for RSR's own page.
@@ -263,6 +281,78 @@ public class KioskActivity extends Activity implements Core.Host {
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.screenBrightness = low ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
         getWindow().setAttributes(lp);
+    }
+
+    /** The kiosk page's own version stamp (kiosk/index.html #version-stamp, e.g. v2026-10-16d). */
+    private void readPageVersion() {
+        if (web == null) return;
+        web.evaluateJavascript("(function(){try{var e=document.getElementById('version-stamp');return e?e.textContent.trim():''}catch(x){return ''}})()", v -> {
+            if (v == null) return;
+            String s = v.replace("\"", "").trim();
+            if (s.matches("v[0-9]{4}-[0-9]{2}-[0-9]{2}[a-z]?")) pageVersion = s;
+        });
+    }
+
+    @Override public String pageVersion() { return pageVersion; }
+    @Override public String pageError() { return pageError; }
+    @Override public long pageErrorAt() { return pageErrorAt; }
+
+    // ---- screenshot for the office (Tablets page) --------------------------------------------
+    // The camera picture is hidden while capturing (no worker faces on the server) and always put back.
+    private static final String HIDE_VIDEO = "(function(){try{document.querySelectorAll('video').forEach(function(v){"
+            + "v.dataset.rsrVis=v.style.visibility||'';v.style.visibility='hidden';});}catch(e){}})()";
+    private static final String SHOW_VIDEO = "(function(){try{document.querySelectorAll('video').forEach(function(v){"
+            + "if(v.dataset.rsrVis!==undefined){v.style.visibility=v.dataset.rsrVis;delete v.dataset.rsrVis;}});}catch(e){}})()";
+
+    /** Main thread. Captures what the kiosk screen shows; answers a base64 JPEG, or null on failure. */
+    @Override
+    public void takeScreenshot(java.util.function.Consumer<String> done) {
+        if (web == null || shooting) { done.accept(null); return; }
+        shooting = true;
+        if (backlightLow) setBacklightLow(false);
+        // Lift the page's black idle cover first (nobody is mid-punch behind it), so the version and any
+        // error banner are on the picture. The page dims itself again on its own timer.
+        web.evaluateJavascript("(function(){try{if(typeof screenBlack!=='undefined'&&screenBlack&&typeof wakeScreen==='function')wakeScreen();}catch(e){}})()", null);
+        web.evaluateJavascript(HIDE_VIDEO, null);
+        ui.postDelayed(() -> {   // let the page draw without the camera
+            try {
+                View d = getWindow().getDecorView();
+                int w = d.getWidth(), h = d.getHeight();
+                if (w <= 0 || h <= 0) { finishShot(null, done); return; }
+                final android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+                android.view.PixelCopy.request(getWindow(), bmp, result -> {
+                    String b64 = null;
+                    if (result == android.view.PixelCopy.SUCCESS) b64 = toJpeg(bmp);
+                    bmp.recycle();
+                    finishShot(b64, done);
+                }, ui);
+            } catch (Throwable t) {
+                Log.w(TAG, "screenshot", t);
+                finishShot(null, done);
+            }
+        }, 800);
+    }
+
+    private void finishShot(String b64, java.util.function.Consumer<String> done) {
+        shooting = false;
+        if (web != null) web.evaluateJavascript(SHOW_VIDEO, null);   // camera back, success or failure
+        done.accept(b64);
+    }
+
+    /** At most 900 px wide, JPEG quality 60: about 50-120 KB, enough to read the screen. */
+    private static String toJpeg(android.graphics.Bitmap src) {
+        try {
+            android.graphics.Bitmap b = src;
+            if (src.getWidth() > 900) {
+                b = android.graphics.Bitmap.createScaledBitmap(src, 900, Math.max(1, Math.round(src.getHeight() * 900f / src.getWidth())), true);
+            }
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            b.compress(android.graphics.Bitmap.CompressFormat.JPEG, 60, out);
+            if (b != src) b.recycle();
+            return android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP);
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     private void readPageDeviceId() {

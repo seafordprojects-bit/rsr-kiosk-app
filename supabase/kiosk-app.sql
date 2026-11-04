@@ -97,6 +97,20 @@ alter table public.kiosk_app_devices add column if not exists token_confirmed   
 alter table public.kiosk_app_devices add column if not exists charge_state      text;   -- charging / full / discharging / not_charging
 alter table public.kiosk_app_devices add column if not exists weak_since        timestamptz;
 alter table public.kiosk_app_devices add column if not exists weak_alerted      boolean not null default false;
+-- what the kiosk page shows (2026-11-04): its version stamp, its last error, and when the last screenshot came
+alter table public.kiosk_app_devices add column if not exists page_version      text;
+alter table public.kiosk_app_devices add column if not exists page_error        text;
+alter table public.kiosk_app_devices add column if not exists page_error_at     timestamptz;
+alter table public.kiosk_app_devices add column if not exists shot_at           timestamptz;
+
+-- latest screenshot of each tablet's kiosk screen (one row per tablet, overwritten; JPEG as base64 text).
+-- REST-locked: only kiosk_app_shot_put (tablet, with its secret) and kiosk_app_shot_get (admin passcode).
+create table if not exists public.kiosk_app_shots (
+  device_id  text primary key,
+  taken_at   timestamptz not null default now(),
+  jpeg       text not null
+);
+revoke all on public.kiosk_app_shots from anon, authenticated;
 
 create table if not exists public.kiosk_app_events (
   id         bigserial primary key,
@@ -182,6 +196,15 @@ begin
     internet        = (p->>'internet')::boolean,
     wifi_signal     = case when p->>'wifi_signal' ~ '^[0-4]$' then (p->>'wifi_signal')::integer end,
     battery_temp    = case when p->>'battery_temp' ~ '^-?[0-9]{1,2}(\.[0-9])?$' then (p->>'battery_temp')::numeric end,
+    -- the kiosk page's own version stamp (e.g. v2026-10-16d); anything else keeps the last good one
+    page_version    = case when p->>'page_version' ~ '^v[0-9]{4}-[0-9]{2}-[0-9]{2}[a-z]?$' then p->>'page_version' else k.page_version end,
+    -- the page's LAST error (kept until a newer one comes); no HTML, at most 300 characters
+    page_error      = case when btrim(coalesce(p->>'page_error','')) <> ''
+                           then left(regexp_replace(p->>'page_error', '[<>]', '', 'g'), 300) else k.page_error end,
+    page_error_at   = case when btrim(coalesce(p->>'page_error','')) <> ''
+                           then case when p->>'page_error_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+(Z|[+-][0-9:]+)$'
+                                     then least((p->>'page_error_at')::timestamptz, now()) else now() end
+                           else k.page_error_at end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -303,6 +326,7 @@ begin
            'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes',
            'wifi', k.wifi, 'internet', k.internet, 'wifi_signal', k.wifi_signal,
            'battery_temp', k.battery_temp, 'last_outage', k.last_outage, 'power_windows', k.power_windows,
+           'page_version', k.page_version, 'page_error', k.page_error, 'page_error_at', k.page_error_at, 'shot_at', k.shot_at,
            'drain_on', case when k.drain_on_n >= 3 then k.drain_on end, 'drain_off', case when k.drain_off_n >= 3 then k.drain_off end,
            'asleep', not public.kiosk_app_awake_now(k.sched_on, k.sched_off),
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
@@ -327,7 +351,7 @@ begin
   if not public.admin_verify_passcode(p_passcode) then
     return jsonb_build_object('error', 'wrong passcode');
   end if;
-  if p_cmd not in ('reload','hard_reload','restart','update','screen_on','screen_off','open_settings','schedule') then
+  if p_cmd not in ('reload','hard_reload','restart','update','screen_on','screen_off','open_settings','schedule','screenshot') then
     return jsonb_build_object('error', 'unknown command');
   end if;
   if p_cmd = 'schedule' and v_arg <> 'off'
@@ -345,6 +369,41 @@ begin
 end $$;
 revoke all on function public.kiosk_app_command(text, text, text, text) from public;
 grant execute on function public.kiosk_app_command(text, text, text, text) to anon, authenticated;
+
+-- STEP 5b - screenshot of the kiosk screen (2026-11-04). The tablet uploads it with its secret; only the
+-- latest one per tablet is kept. The office reads it with the admin passcode. Never in kiosk_app_list (size).
+create or replace function public.kiosk_app_shot_put(p_device text, p_token text, p_jpeg text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+begin
+  if not exists (select 1 from public.kiosk_app_devices k
+                  where k.device_id = p_device and k.token is not null and k.token = p_token) then
+    return jsonb_build_object('error', 'token');
+  end if;
+  if length(coalesce(p_jpeg, '')) > 700000 then return jsonb_build_object('error', 'too big'); end if;
+  -- base64 of a JPEG always starts with /9j/ and has only base64 characters
+  if coalesce(p_jpeg, '') !~ '^/9j/[A-Za-z0-9+/]+=*$' then return jsonb_build_object('error', 'not a jpeg'); end if;
+  insert into public.kiosk_app_shots as s (device_id, taken_at, jpeg) values (p_device, now(), p_jpeg)
+  on conflict (device_id) do update set taken_at = excluded.taken_at, jpeg = excluded.jpeg;
+  update public.kiosk_app_devices k set shot_at = now() where k.device_id = p_device;
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_shot_put(text, text, text) from public;
+grant execute on function public.kiosk_app_shot_put(text, text, text) to anon, authenticated;
+
+create or replace function public.kiosk_app_shot_get(p_passcode text, p_device text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare v jsonb;
+begin
+  -- Return (never raise) on a wrong passcode: raising would roll back the wrong-try counter.
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  select jsonb_build_object('taken_at', s.taken_at, 'jpeg', s.jpeg) into v
+    from public.kiosk_app_shots s where s.device_id = p_device;
+  return coalesce(v, jsonb_build_object('error', 'no screenshot yet'));
+end $$;
+revoke all on function public.kiosk_app_shot_get(text, text) from public;
+grant execute on function public.kiosk_app_shot_get(text, text) to anon, authenticated;
 
 -- STEP 6a - "1 h 25 min" style text for alerts
 create or replace function public.kiosk_app_dur(p interval)

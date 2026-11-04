@@ -151,6 +151,25 @@ public class AwakeTest {
         ok(body(act, "protected void onResume()").contains("KeepAlive.start("), "started again whenever the kiosk is in front (always allowed)");
         ok(Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/BootReceiver.java")).contains("KeepAlive.start("), "started after a restart / app update");
 
+        System.out.println("Page version, last page error, screenshot (2026-11-04: owner wants to confirm the version and see errors remotely)");
+        // (beat() holds a "{" inside a string, so it is cut by the next method instead of by braces)
+        int bs = core.indexOf("private void beat()"), be = core.indexOf("private static String isoUtc(");
+        if (bs < 0 || be < bs) throw new AssertionError("beat() / isoUtc() not found in Core.java");
+        String beatSrc = core.substring(bs, be);
+        ok(beatSrc.contains("\"page_version\"") && beatSrc.contains("\"page_error\""), "every heartbeat carries the kiosk page version and its last error");
+        ok(act.contains("onConsoleMessage") && act.contains("MessageLevel.ERROR"), "page errors are caught from the page's console (errors only)");
+        ok(act.contains("version-stamp"), "version is read from the page's own stamp (#version-stamp)");
+        String shot = core.substring(core.indexOf("case \"screenshot\":"));
+        shot = shot.substring(0, shot.indexOf("break;\n            }") > 0 ? shot.indexOf("break;\n            }") : shot.length());
+        ok(shot.contains("inMaintenance()") && shot.indexOf("inMaintenance()") < shot.indexOf("takeScreenshot"), "no screenshot while settings are open");
+        ok(shot.contains("waitUntilSafe(") && shot.indexOf("waitUntilSafe(") < shot.indexOf("takeScreenshot"), "never while a worker is mid-punch (waits, then refuses)");
+        ok(shot.contains("kiosk_app_shot_put") && shot.contains("prefs.token()"), "uploaded with the tablet's secret");
+        String ts = body(act, "public void takeScreenshot(");
+        int hide = ts.indexOf("HIDE_VIDEO"), copy = ts.indexOf("PixelCopy.request");
+        ok(hide >= 0 && copy > hide, "the camera picture is hidden BEFORE the screen is captured (no worker faces)");
+        ok(act.contains("SHOW_VIDEO") && body(act, "private void finishShot(").contains("SHOW_VIDEO"), "the camera picture is always put back, success or failure");
+        ok(ts.contains("screenBlack"), "the black idle cover is lifted first, so the version and errors are visible");
+
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
     }

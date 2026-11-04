@@ -41,6 +41,13 @@ final class Core {
         void nudgePage();
         /** Office pressed Screen on: undim the backlight and lift the page's black screen. Main thread. */
         void wakeAndBrighten();
+        /** The kiosk page's version stamp ("" if not read yet). Any thread. */
+        String pageVersion();
+        /** The page's last error ("" if none) and when (ms). Any thread. */
+        String pageError();
+        long pageErrorAt();
+        /** Capture the kiosk screen (camera hidden). Main thread; answers a base64 JPEG or null. */
+        void takeScreenshot(java.util.function.Consumer<String> done);
         /** Is a worker in the middle of a punch (employee selected / dialog open)? Main thread; answers async. */
         void pageBusy(java.util.function.Consumer<Boolean> answer);
     }
@@ -250,6 +257,11 @@ final class Core {
             if (h != null) {
                 p.put("page_url", h.pageUrl());
                 p.put("page_ok", h.pageOk());
+                if (!h.pageVersion().isEmpty()) p.put("page_version", h.pageVersion());
+                if (h.pageErrorAt() > 0) {
+                    p.put("page_error", h.pageError());
+                    p.put("page_error_at", isoUtc(h.pageErrorAt()));
+                }
             }
             p.put("model", Build.MANUFACTURER + " " + Build.MODEL + " / Android " + Build.VERSION.RELEASE);
             String ev = pendingEvent;
@@ -285,6 +297,12 @@ final class Core {
         } catch (Exception e) {
             prefs.setLastBeatStatus("offline (" + e.getClass().getSimpleName() + ")");
         }
+    }
+
+    private static String isoUtc(long t) {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+        return f.format(new java.util.Date(t));
     }
 
     private void ack(long id, String result) {
@@ -346,6 +364,31 @@ final class Core {
             case "schedule":
                 ack(id, applyScheduleArg(arg));
                 break;
+            case "screenshot": {
+                if (prefs.inMaintenance()) { ack(id, "refused: settings are open (maintenance)"); break; }
+                // never while a worker is mid-punch: wait for 20 s without a touch, at most 2 min
+                if (!waitUntilSafe(20, 120)) { ack(id, "refused: kiosk in use - send again later"); break; }
+                if (host.get() == null) { ack(id, "failed: kiosk screen not running"); break; }
+                wakeScreen();   // PixelCopy needs the screen on and the kiosk in front
+                final String[] pic = {null};
+                final java.util.concurrent.CountDownLatch l = new java.util.concurrent.CountDownLatch(1);
+                main.postDelayed(() -> {
+                    Host hh = host.get();
+                    if (hh == null) { l.countDown(); return; }
+                    hh.takeScreenshot(b -> { pic[0] = b; l.countDown(); });
+                }, 1500);
+                try { l.await(20, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+                if (pic[0] == null) { ack(id, "failed: could not capture the screen"); break; }
+                try {
+                    JSONObject b = new JSONObject().put("p_device", prefs.deviceId()).put("p_token", prefs.token()).put("p_jpeg", pic[0]);
+                    String resp = Net.rpc("kiosk_app_shot_put", b.toString());
+                    JSONObject r = resp.trim().startsWith("{") ? new JSONObject(resp) : new JSONObject();
+                    ack(id, r.optBoolean("ok") ? "done" : "failed: " + r.optString("error", "upload"));
+                } catch (Exception e) {
+                    ack(id, "failed: upload (" + e.getClass().getSimpleName() + ")");
+                }
+                break;
+            }
             default:
                 ack(id, "unknown command");
         }

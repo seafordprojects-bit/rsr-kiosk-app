@@ -324,15 +324,42 @@ const t5 = (await q(`select public.kiosk_app_beat('{"device_id":"app-tk1","token
 ok(t5.error==='token','wrong secret refused');
 await beat({device_id:'app-tk1',token:t1.token,name:'Niño kiosk'});
 ok((await q(`select name from kiosk_app_devices where device_id='app-tk1'`))[0].name==='Niño kiosk','accented names kept');
+// ---- page version + last page error + screenshot (2026-11-04) ----
+await beat({device_id:'app-tk1',token:t1.token,page_version:'v2026-10-16d',page_error:'Uncaught TypeError: x is <b>null</b>',page_error_at:'2026-11-04T06:00:00Z'});
+let PV=(await q(`select page_version,page_error,page_error_at from kiosk_app_devices where device_id='app-tk1'`))[0];
+ok(PV.page_version==='v2026-10-16d','kiosk page version saved');
+ok(PV.page_error==='Uncaught TypeError: x is bnull/b' && PV.page_error_at!==null,'last page error saved, < > stripped');
+await beat({device_id:'app-tk1',token:t1.token,page_version:'<script>alert(1)</script>'});
+ok((await q(`select page_version v from kiosk_app_devices where device_id='app-tk1'`))[0].v==='v2026-10-16d','junk version ignored (old one kept)');
+await beat({device_id:'app-tk1',token:t1.token,page_error:'x'.repeat(5000)});
+ok((await q(`select length(page_error) n from kiosk_app_devices where device_id='app-tk1'`))[0].n<=300,'long error cut to 300');
+await beat({device_id:'app-tk1',token:t1.token});
+ok((await q(`select page_error e from kiosk_app_devices where device_id='app-tk1'`))[0].e!==null,'a report without an error keeps the last error');
+r=(await q(`select public.kiosk_app_command('123456','app-tk1','screenshot','') r`))[0].r; ok(r.ok===true,'screenshot command accepted');
+const JPG='/9j/'+'A'.repeat(2000);
+r=(await q(`select public.kiosk_app_shot_put('app-tk1','guess',$1) r`,[JPG]))[0].r; ok(r.error==='token','shot with wrong secret refused');
+ok((await q(`select count(*)::int n from kiosk_app_shots`))[0].n===0,'nothing stored on refusal');
+r=(await q(`select public.kiosk_app_shot_put('app-tk1',$1,$2) r`,[t1.token,'hello<script>']))[0].r; ok(r.error==='not a jpeg','non-jpeg refused');
+r=(await q(`select public.kiosk_app_shot_put('app-tk1',$1,$2) r`,[t1.token,'/9j/'+'A'.repeat(700001)]))[0].r; ok(r.error==='too big','over-size picture refused');
+r=(await q(`select public.kiosk_app_shot_put('app-tk1',$1,$2) r`,[t1.token,JPG]))[0].r; ok(r.ok===true,'shot stored');
+r=(await q(`select public.kiosk_app_shot_put('app-tk1',$1,$2) r`,[t1.token,JPG+'B']))[0].r;
+ok((await q(`select count(*)::int n from kiosk_app_shots`))[0].n===1,'only the latest shot per tablet is kept');
+r=(await q(`select public.kiosk_app_shot_get('000000','app-tk1') r`))[0].r; ok(r.error==='wrong passcode' && !r.jpeg,'shot needs the admin passcode');
+r=(await q(`select public.kiosk_app_shot_get('123456','app-tk1') r`))[0].r; ok(r.jpeg===JPG+'B' && !!r.taken_at,'office gets the latest shot');
+r=(await q(`select public.kiosk_app_shot_get('123456','app-none') r`))[0].r; ok(r.error==='no screenshot yet','no shot yet');
+L=(await q(`select public.kiosk_app_list('123456') r`))[0].r; const LT=L.find(x=>x.device_id==='app-tk1');
+ok(LT.page_version==='v2026-10-16d' && !!LT.page_error && !!LT.shot_at && !('jpeg' in LT),'list shows version, error, shot time (never the picture itself)');
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
 ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c.query(`select public.kiosk_app_tick()`);}catch(e){tickDenied=true;} ok(tickDenied,'anon cannot run tick');
 let stOk=true; try{ await c.query(`select public.kiosk_app_status()`);}catch(e){stOk=false;} ok(stOk,'anon can read status');
+let shotDenied=false; try{ await c.query(`select * from kiosk_app_shots`);}catch(e){shotDenied=true;} ok(shotDenied,'anon cannot read screenshots directly');
 let beatOk=true; try{ await c.query(`select public.kiosk_app_beat('{"device_id":"app-t1"}')`);}catch(e){beatOk=false; console.log(e.message)} ok(beatOk,'anon can beat');
 await c.query(`reset role`);
 // rollback
 await c.query(fs.readFileSync('./kiosk-app-rollback.sql','utf8'));
+ok((await q(`select to_regclass('public.kiosk_app_shots') t`))[0].t===null,'rollback removes screenshots');
 ok((await q(`select to_regclass('public.kiosk_app_devices') t`))[0].t===null && (await q(`select count(*)::int n from cron.job`))[0].n===0,'rollback clean');
 await c.end(); await db.stop();
 console.log(fails? `${fails} FAILED` : 'ALL PASS'); process.exit(fails?1:0);
