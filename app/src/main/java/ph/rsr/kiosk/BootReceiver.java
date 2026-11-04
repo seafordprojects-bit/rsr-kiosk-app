@@ -19,6 +19,7 @@ public class BootReceiver extends BroadcastReceiver {
             core.applyAwake();   // the app may have started first and taken the maintenance screen lock
         }
         Policy.applyKioskPolicies(c);
+        KeepAlive.start(c);
         core.scheduleNextAlarm();
         core.scheduleReportAlarm();
         core.scheduleUpdateAlarm();

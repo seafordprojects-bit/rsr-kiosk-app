@@ -161,6 +161,7 @@ final class Core {
     }
 
     void start() {
+        KeepAlive.start(ctx);   // foreground class: never frozen, network kept (device owner may start it any time)
         bg.removeCallbacksAndMessages(null);
         watchPower();
         bg.post(this::loop);

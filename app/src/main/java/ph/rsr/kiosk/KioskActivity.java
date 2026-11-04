@@ -302,6 +302,7 @@ public class KioskActivity extends Activity implements Core.Host {
         super.onResume();
         Core core = Core.get(this);
         core.setHost(this);
+        KeepAlive.start(this);   // in front = always allowed; restarts it if Android ever stopped it
         applyScreenFlag(true);   // the app decides when the screen goes off (Core.checkScheduleTransition)
         hideBars();
         if (!prefs.inMaintenance()) startLock();

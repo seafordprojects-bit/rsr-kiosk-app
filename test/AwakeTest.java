@@ -128,6 +128,20 @@ public class AwakeTest {
         ok(cmd.contains("wakeScreenOnly()"), "during maintenance Screen on does not pull the kiosk over Android settings");
         ok(!body(core, "void reportWake()").contains("wakeAndBrighten"), "roll-call report wakes do NOT light the page (only push punches)");
 
+        System.out.println("Kiosk runs as a foreground service (2026-11-04: offline every time the kiosk was not the front app)");
+        String man = Files.readString(Path.of("app/src/main/AndroidManifest.xml"));
+        ok(man.contains("android.permission.FOREGROUND_SERVICE\"") && man.contains("android.permission.FOREGROUND_SERVICE_SPECIAL_USE"),
+                "manifest asks for the foreground-service permissions (Android 14 needs the typed one)");
+        ok(man.contains("android:name=\".KeepAlive\"") && man.contains("android:foregroundServiceType=\"specialUse\"")
+                && man.contains("PROPERTY_SPECIAL_USE_FGS_SUBTYPE"), "manifest declares KeepAlive as a specialUse foreground service");
+        String ka = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KeepAlive.java"));
+        ok(ka.contains("startForeground(") && ka.contains("FOREGROUND_SERVICE_TYPE_SPECIAL_USE"), "the service goes to the foreground with its type");
+        ok(ka.contains("START_STICKY"), "Android restarts it if it is ever killed");
+        ok(body(ka, "static void start(").contains("catch"), "a refused start never crashes the kiosk");
+        ok(body(core, "void start()").contains("KeepAlive.start("), "started with the app (every process start)");
+        ok(body(act, "protected void onResume()").contains("KeepAlive.start("), "started again whenever the kiosk is in front (always allowed)");
+        ok(Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/BootReceiver.java")).contains("KeepAlive.start("), "started after a restart / app update");
+
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
     }
