@@ -26,6 +26,17 @@
   @media (prefers-color-scheme:dark){button.primary{color:#0f151c}}
   button.danger{color:var(--bad)}
   button:disabled{opacity:.5}
+  /* press feedback (owner 2026-11-04): highlight on press, spinner until the tablet answers, then the result */
+  button{transition:transform .08s,box-shadow .08s,background .2s}
+  button:active{transform:scale(.96);filter:brightness(.88);box-shadow:0 0 0 3px var(--warn)}
+  button.busy{background:#fff4d6;border-color:var(--warn);color:var(--warn);opacity:1;box-shadow:0 0 0 2px var(--warn)}
+  button.okd{background:#e7f6ef;border-color:var(--ok);color:var(--ok);box-shadow:0 0 0 2px var(--ok)}
+  button.bad{background:#fdecea;border-color:var(--bad);color:var(--bad);box-shadow:0 0 0 2px var(--bad)}
+  @media (prefers-color-scheme:dark){button.busy{background:#3a2f12;color:#ffc04d}button.okd{background:#123326;color:#5fd6a4}button.bad{background:#3a1717;color:#ff8a80}}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;
+        vertical-align:-2px;margin-right:6px;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .sub{display:block;font-size:12px;font-weight:400}
   input{font:inherit;padding:12px;border:1px solid var(--line);border-radius:10px;width:100%;background:var(--card);color:var(--ink)}
   .mute{color:var(--mute);font-size:14px}
   .msg{padding:10px 12px;border-radius:10px;margin-bottom:12px;display:none}
@@ -51,7 +62,7 @@
   </div>
 
   <div id="list"></div>
-  <p class="mute" id="foot" style="display:none">Refreshes every 20 seconds. A command reaches the tablet within about 1 minute.</p>
+  <p class="mute" id="foot" style="display:none">Refreshes every 20 seconds (every 3 seconds while a command is waiting). A command reaches the tablet within about 1 minute.</p>
 </main>
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script>
@@ -59,6 +70,15 @@ const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
 let timer = null;
+// A command pressed here, before the server shows it as waiting: {device: {cmd, at}}. Shown busy at once.
+const sending = {};
+const NAMES = { reload: 'Reload page', hard_reload: 'Full reload', update: 'Update app', screen_on: 'Screen on',
+  screenshot: 'Screenshot', screen_off: 'Screen off', open_settings: 'Open settings', restart: 'Restart tablet', schedule: 'Set schedule' };
+const FAST_MS = 3000, SLOW_MS = 20000;
+function schedule(fast) {
+  clearTimeout(timer);
+  timer = setTimeout(load, fast ? FAST_MS : SLOW_MS);
+}
 
 async function rpc(fn, body) {
   const r = await fetch(SB + '/rest/v1/rpc/' + fn, {
@@ -90,27 +110,89 @@ function hhmm(iso) {
 }
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+let loadSeq = 0, drawnSeq = 0;
 async function load() {
+  const my = ++loadSeq, pc = passcode;
   try {
-    const rows = await rpc('kiosk_app_list', { p_passcode: passcode });
+    const rows = await rpc('kiosk_app_list', { p_passcode: pc });
+    if (my < drawnSeq) return;            // an older answer arriving late never paints over a newer one
+    drawnSeq = my;
     if (rows && rows.error) {
-      passcode = ''; clearInterval(timer);
-      document.getElementById('login').style.display = '';
-      document.getElementById('list').innerHTML = '';
-      document.getElementById('foot').style.display = 'none';
-      show(rows.error === 'wrong passcode' ? 'Wrong passcode (after 10 wrong tries it locks for 15 minutes).' : rows.error, 'err');
+      if (passcode === pc) logout(rows.error);   // only if nobody typed a new passcode meanwhile
       return;
     }
     document.getElementById('login').style.display = 'none';
     document.getElementById('foot').style.display = '';
     document.getElementById('stamp').textContent = 'Updated ' + new Date().toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' });
     render(rows || []);
+    schedule(wantFast(rows || []));
   } catch (e) {
+    if (my < drawnSeq) return;
     show('Cannot reach the server: ' + e.message, 'err');
+    schedule(false);
   }
 }
 
+function logout(err) {
+  passcode = ''; clearTimeout(timer);
+  document.getElementById('login').style.display = '';
+  document.getElementById('list').innerHTML = '';
+  document.getElementById('foot').style.display = 'none';
+  show(err === 'wrong passcode' ? 'Wrong passcode (after 10 wrong tries it locks for 15 minutes).' : err, 'err');
+}
+
+// ---- what a command button shows (owner 2026-11-04) -------------------------------------------
+// busy:  from the press, while the server holds it ("waiting"), and while the tablet works on it ("started",
+//        e.g. a restart waiting for a quiet moment, up to 6 min); then the result (green / red) for 30 s.
+// Results are only shown for a command this page watched (pressed here or seen waiting), and the 30 s are
+// counted on this phone's clock from the moment the result was first seen (phone and server clocks may differ).
+const firstSeen = {}, watched = {};
+const WORK_MS = 6 * 60000, RESULT_MS = 30000;
+function since(key) { if (!(key in firstSeen)) firstSeen[key] = Date.now(); return Date.now() - firstSeen[key]; }
+function cmdState(t, cmd) {
+  const loc = sending[t.device_id];
+  if (loc && loc.cmd === cmd) return { k: 'busy', sub: 'Sending...' };
+  if (t.cmd !== cmd || !t.cmd_at) return null;
+  const key = t.device_id + '|' + t.cmd_at;
+  if (t.pending) { watched[key] = 1; return { k: 'busy', sub: 'Waiting for tablet...' }; }
+  if (t.cmd_result === 'started') {
+    watched[key] = 1;
+    // server time check too, so an old "started" seen for the first time is not shown as busy forever
+    if (since(key + '|started') < WORK_MS && Date.now() - new Date(t.cmd_done_at || t.cmd_at).getTime() < WORK_MS + 600000)
+      return { k: 'busy', sub: 'Tablet is working on it...' };
+    return since(key + '|started') < WORK_MS + RESULT_MS ? { k: 'bad', sub: 'No answer from the tablet' } : null;
+  }
+  if (!watched[key]) return null;
+  if (!t.cmd_done_at) {   // the server let it expire: the tablet never picked it up
+    return since(key + '|expired') < RESULT_MS ? { k: 'bad', sub: 'Not picked up (tablet offline?)' } : null;
+  }
+  if (since(key + '|done') >= RESULT_MS) return null;
+  const good = /^(done|restarting|installing|up to date|schedule )/i.test(t.cmd_result || '');
+  return good ? { k: 'okd', sub: 'Done' } : { k: 'bad', sub: 'Not done: ' + (t.cmd_result || '') };
+}
+function busyCmd(t) {
+  for (const c of Object.keys(NAMES)) { const st = cmdState(t, c); if (st && st.k === 'busy') return c; }
+  return null;
+}
+// every 3 s while a command is waiting on an ONLINE tablet (at most 6 min); otherwise every 20 s
+function wantFast(rows) {
+  if (document.hidden) return false;
+  if (Object.keys(sending).length) return true;
+  return rows.some(t => t.online && busyCmd(t) && Date.now() - new Date(t.cmd_at).getTime() < WORK_MS + 600000);
+}
+
+// One command button. The click is handled by one listener below (data-* values, never code in the HTML).
+function cmdBtn(t, cmd, label, confirmText, cls, extraData) {
+  const st = cmdState(t, cmd);
+  let inner = esc(label);
+  if (st && st.k === 'busy') inner = '<span class="spin"></span>' + esc(label) + '<span class="sub">' + esc(st.sub) + '</span>';
+  else if (st) inner = (st.k === 'okd' ? '&#10003; ' : '&#10007; ') + esc(label) + '<span class="sub">' + esc(st.sub) + '</span>';
+  return `<button data-dev="${esc(t.device_id)}" data-cmd="${esc(cmd)}" data-confirm="${esc(confirmText || '')}" ${extraData || ''}`
+       + ` class="${cls || ''}${st ? ' ' + st.k : ''}"${st && st.k === 'busy' ? ' disabled' : ''}>${inner}</button>`;
+}
+
 function render(rows) {
+  lastRows = rows;
   const L = document.getElementById('list');
   if (!rows.length) { L.innerHTML = '<div class="card">No tablet is running the RSR Kiosk app yet.</div>'; return; }
   L.innerHTML = rows.map(t => {
@@ -143,17 +225,17 @@ function render(rows) {
       </div>
       <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>
       <div class="btns">
-        <button class="primary" onclick="send('${id}','reload')">Reload page</button>
-        <button onclick="send('${id}','hard_reload','','Full reload clears the old cached kiosk version (punches are kept). Continue?')">Full reload</button>
-        <button onclick="send('${id}','update')">Update app</button>
-        <button onclick="send('${id}','screen_on')">Screen on</button>
-        <button onclick="send('${id}','screenshot')">Screenshot</button>
+        ${cmdBtn(t, 'reload', 'Reload page', '', 'primary')}
+        ${cmdBtn(t, 'hard_reload', 'Full reload', 'Full reload clears the old cached kiosk version (punches are kept). Continue?')}
+        ${cmdBtn(t, 'update', 'Update app')}
+        ${cmdBtn(t, 'screen_on', 'Screen on')}
+        ${cmdBtn(t, 'screenshot', 'Screenshot')}
         ${t.shot_at ? `<button onclick="viewShot('${id}')">View screenshot<br><span class="mute">${hhmm(t.shot_at)}</span></button>` : ''}
-        <button onclick="send('${id}','screen_off','','Turn the screen off now?')">Screen off</button>
-        <button onclick="askSchedule('${id}','${esc(t.sched_on || '05:30')}','${esc(t.sched_off || '22:30')}')">Set schedule</button>
+        ${cmdBtn(t, 'screen_off', 'Screen off', 'Turn the screen off now?')}
+        ${cmdBtn(t, 'schedule', 'Set schedule', '', '', 'data-on="' + esc(t.sched_on || '05:30') + '" data-off="' + esc(t.sched_off || '22:30') + '"')}
         <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
-        <button onclick="send('${id}','open_settings','','Open the settings screen on the tablet (no passcode needed for 10 minutes)?')">Open settings</button>
-        <button class="danger" onclick="send('${id}','restart','','Restart the tablet now? Workers cannot punch for about 1 minute.')">Restart tablet</button>
+        ${cmdBtn(t, 'open_settings', 'Open settings', 'Open the settings screen on the tablet (no passcode needed for 10 minutes)?')}
+        ${cmdBtn(t, 'restart', 'Restart tablet', 'Restart the tablet now? Workers cannot punch for about 1 minute.', 'danger')}
         <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
       </div>
       ${ev ? '<ul class="ev">' + ev + '</ul>' : ''}
@@ -161,15 +243,40 @@ function render(rows) {
   }).join('');
 }
 
+let lastRows = [];
 async function send(device, cmd, arg, confirmText) {
+  if (sending[device]) return;   // one press at a time per tablet
+  // The tablet holds ONE command: a new one replaces a waiting one. Ask before replacing.
+  const t = lastRows.find(x => x.device_id === device);
+  const b = t && busyCmd(t);
+  if (b && !confirm('"' + (NAMES[b] || b) + '" is still ' + (t.pending ? 'waiting for' : 'running on') + ' the tablet.\nSend "'
+                    + (NAMES[cmd] || cmd) + '" anyway?' + (t.pending ? ' (the waiting one is cancelled)' : ''))) return;
   if (confirmText && !confirm(confirmText)) return;
+  sending[device] = { cmd, at: Date.now() };
+  render(lastRows);   // busy at once, before the server answers
+  let wrong = false;
   try {
     const r = await rpc('kiosk_app_command', { p_passcode: passcode, p_device: device, p_cmd: cmd, p_arg: arg || '' });
-    if (r && r.error) { show(r.error, 'err'); return; }
-    show('Sent "' + cmd + '". The tablet picks it up within about 1 minute.', 'ok');
-    load();
+    if (r && r.error) { wrong = r.error === 'wrong passcode'; show(r.error, 'err'); return; }
+    show('Sent "' + (NAMES[cmd] || cmd) + '". The button shows when the tablet is done.', 'ok');
   } catch (e) { show('Not sent: ' + e.message, 'err'); }
+  finally {
+    delete sending[device];
+    if (wrong) logout('wrong passcode'); else load();   // never spend a second wrong try
+  }
 }
+
+// Back to the page after looking elsewhere: refresh at once (refreshes are slow while the page is hidden).
+document.addEventListener('visibilitychange', () => { if (!document.hidden && passcode) load(); });
+
+// One listener for every command button (values come from data-*, so no text can turn into code).
+document.getElementById('list').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-cmd]');
+  if (!btn || btn.disabled) return;
+  const d = btn.dataset;
+  if (d.cmd === 'schedule') askSchedule(d.dev, d.on, d.off);
+  else send(d.dev, d.cmd, '', d.confirm || '');
+});
 
 // The latest screenshot of the kiosk screen (camera hidden). Shown on top; the list keeps refreshing below.
 async function viewShot(device) {
@@ -213,9 +320,8 @@ document.getElementById('go').onclick = () => {
   document.getElementById('pc').value = '';
   if (!passcode) return;
   show('');
+  clearTimeout(timer);
   load();
-  clearInterval(timer);
-  timer = setInterval(load, 20000);
 };
 document.getElementById('pc').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
 </script>
