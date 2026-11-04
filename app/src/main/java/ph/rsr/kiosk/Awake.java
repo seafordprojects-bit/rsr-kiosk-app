@@ -24,6 +24,17 @@ final class Awake {
         this.screen = screen;
     }
 
+    /**
+     * Counts as "on the charger" only when the charger really keeps up (review 2026-11-04): a weak charger,
+     * bad cable or PC port can be plugged in and still lose charge, and then the locks would drain it.
+     * plugged / status are BatteryManager values (status 2 = charging, 4 = not charging, 5 = full).
+     */
+    static boolean onCharger(int plugged, int status, int levelPct, double tempC) {
+        if (plugged == 0 || levelPct < 30 || tempC >= 43) return false;
+        boolean keepingUp = status == 2 || status == 5 || status == 4;   // 4: held at 85% by battery protection
+        return keepingUp || levelPct >= 50;
+    }
+
     synchronized void apply(boolean plugged, boolean maintenance) {
         boolean net = plugged || maintenance;
         set(cpu, net);
@@ -36,6 +47,8 @@ final class Awake {
         try {
             if (on && !l.held()) l.acquire();
             else if (!on && l.held()) l.release();
-        } catch (Throwable ignored) { }
+        } catch (RuntimeException e) {
+            System.err.println("RSRAwake lock refused: " + e);
+        }
     }
 }

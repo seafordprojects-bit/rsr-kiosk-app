@@ -16,6 +16,7 @@ public class BootReceiver extends BroadcastReceiver {
             core.reportEvent("tablet restarted");
             // A restart always ends maintenance: the tablet comes back locked.
             new Prefs(c).setMaintenanceUntil(0);
+            core.applyAwake();   // the app may have started first and taken the maintenance screen lock
         }
         Policy.applyKioskPolicies(c);
         core.scheduleNextAlarm();

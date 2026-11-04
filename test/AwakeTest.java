@@ -77,6 +77,20 @@ public class AwakeTest {
         try { aw2.apply(true, true); } catch (Throwable t) { threw = true; }
         ok(!threw && w2.held && s2.held, "a refused lock never crashes the kiosk and never blocks the others");
 
+        System.out.println("On the charger = really charging (review 2026-11-04: a weak charger or PC port is plugged but losing charge)");
+        int AC = 1, CHARGING = 2, DISCHARGING = 3, NOT_CHARGING = 4, FULL = 5;
+        ok(Awake.onCharger(AC, CHARGING, 80, 35), "plugged and charging: keep awake");
+        ok(Awake.onCharger(AC, FULL, 100, 35), "plugged and full: keep awake");
+        ok(Awake.onCharger(AC, NOT_CHARGING, 85, 35), "plugged, held at 85% by Samsung battery protection: keep awake");
+        ok(!Awake.onCharger(0, DISCHARGING, 90, 35), "not plugged: never");
+        ok(!Awake.onCharger(AC, DISCHARGING, 40, 35), "plugged but losing charge below 50% (weak charger): let it sleep");
+        ok(Awake.onCharger(AC, DISCHARGING, 70, 35), "plugged, losing a little at 70%: still awake (above 50%)");
+        ok(!Awake.onCharger(AC, CHARGING, 25, 35), "below 30%: always let it sleep, even if it says charging");
+        ok(!Awake.onCharger(AC, CHARGING, 80, 43), "battery 43 C or hotter: let it cool down");
+        ok(Awake.onCharger(AC, CHARGING, 80, 42.9), "42.9 C: still fine (boundary)");
+        ok(Awake.onCharger(AC, CHARGING, 30, 35), "exactly 30%: still fine (boundary)");
+        ok(!Awake.onCharger(AC, CHARGING, -1, 35), "unknown battery level: let it sleep (safe side)");
+
         System.out.println("Wiring in Core.java (source check: fails loudly if a method is missing)");
         String core = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/Core.java"));
         ok(body(core, "private void loop()").contains("applyAwake()"), "loop() re-applies the locks every minute");
@@ -84,8 +98,18 @@ public class AwakeTest {
         ok(body(core, "void endMaintenance()").contains("applyAwake()"), "endMaintenance() releases the screen lock at once");
         ok(body(core, "void start()").contains("ACTION_POWER_CONNECTED") || body(core, "private void watchPower()").contains("ACTION_POWER_CONNECTED"),
                 "plugging / unplugging the charger re-applies at once");
-        ok(body(core, "void checkScheduleTransition()").contains("prefs.inMaintenance()"),
-                "the night / evening idle screen-off is skipped during maintenance (office is using Android settings)");
+        String sched = body(core, "void checkScheduleTransition()");
+        int guard = sched.indexOf("if (prefs.inMaintenance()) return;"), off = sched.indexOf("screenOff(");
+        ok(guard >= 0 && off > guard, "the night / evening idle screen-off is skipped during maintenance, and the guard comes BEFORE screenOff");
+        ok(body(core, "void endMaintenance()").contains("touched()"),
+                "ending maintenance counts as a touch (the screen does not go black a minute later at night)");
+        ok(body(core, "private void checkMaintenanceExpiry()").contains("Config.MAINTENANCE_MS"),
+                "a clock set backwards cannot stretch maintenance past 10 minutes");
+        ok(body(core, "void applyAwake()").contains("synchronized"),
+                "applyAwake reads its inputs and applies under one lock (no out-of-order apply between threads)");
+        String boot = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/BootReceiver.java"));
+        int clear = boot.indexOf("setMaintenanceUntil(0)"), app = boot.indexOf("applyAwake()", Math.max(clear, 0));
+        ok(clear >= 0 && app > clear, "after a reboot during maintenance the screen lock is released at once");
 
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);

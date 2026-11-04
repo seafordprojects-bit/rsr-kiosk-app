@@ -388,7 +388,10 @@ final class Core {
             changed = lastOnHours != null && lastOnHours != onHours;
             lastOnHours = onHours;
         }
-        if (changed && onHours) { wakeScreen(); return; }
+        if (changed && onHours) {
+            if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreen();
+            return;
+        }
         // Maintenance: the office is in Android settings, where touches do not reach the kiosk's idle timer.
         // Never turn the screen off under them (2026-11-04).
         if (prefs.inMaintenance()) return;
@@ -463,6 +466,18 @@ final class Core {
         }
     }
 
+    /** Light the screen without bringing the kiosk to the front (maintenance: office is in Android settings). */
+    @SuppressWarnings("deprecation")
+    private void wakeScreenOnly() {
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP
+                    | PowerManager.ON_AFTER_RELEASE, "rsr:wake").acquire(5000);
+        } catch (Exception e) {
+            Log.w(TAG, "wake", e);
+        }
+    }
+
     @SuppressWarnings("deprecation")
     void wakeScreen() {
         try {
@@ -498,7 +513,9 @@ final class Core {
         return awake;
     }
 
+    // No timeout on purpose: applyAwake() re-checks every minute and on every plug / unplug.
     @SuppressWarnings("deprecation")
+    @android.annotation.SuppressLint("WakelockTimeout")
     private Awake buildAwake() {
         Awake.Lock none = new Awake.Lock() {
             public void acquire() { }
@@ -538,18 +555,28 @@ final class Core {
         };
     }
 
-    /** Charger connected (the "charging" flag in the heartbeat is the same reading). */
+    /** On a charger that really keeps up (see Awake.onCharger). Unknown = no (safe side for the battery). */
     private boolean plugged() {
         try {
             Intent b = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-            return b != null && b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+            if (b == null) return false;
+            int lvl = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+            int pct = lvl >= 0 && sc > 0 ? Math.round(lvl * 100f / sc) : -1;
+            int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0);   // tenths of a degree C
+            return Awake.onCharger(b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0),
+                    b.getIntExtra(BatteryManager.EXTRA_STATUS, -1), pct, temp / 10.0);
         } catch (Exception e) {
             return false;
         }
     }
 
+    private final Object awakeGate = new Object();
+
+    /** Any thread. Inputs are read and applied under one lock, so two threads never apply out of order. */
     void applyAwake() {
-        try { awake().apply(plugged(), prefs.inMaintenance()); } catch (Throwable t) { Log.w(TAG, "awake", t); }
+        synchronized (awakeGate) {
+            try { awake().apply(plugged(), prefs.inMaintenance()); } catch (Exception e) { Log.w(TAG, "awake", e); }
+        }
     }
 
     /** Plug / unplug: re-apply at once (an unplugged tablet asleep would otherwise wait for its next wake). */
@@ -561,10 +588,13 @@ final class Core {
         try {
             IntentFilter f = new IntentFilter(Intent.ACTION_POWER_CONNECTED);
             f.addAction(Intent.ACTION_POWER_DISCONNECTED);
-            ctx.registerReceiver(new android.content.BroadcastReceiver() {
+            android.content.BroadcastReceiver r = new android.content.BroadcastReceiver() {
+                // Right here, not on the background thread: that one can be busy for minutes (update, reload wait).
                 @Override
-                public void onReceive(Context c, Intent i) { bg.post(Core.this::applyAwake); }
-            }, f);
+                public void onReceive(Context c, Intent i) { applyAwake(); }
+            };
+            if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(r, f, Context.RECEIVER_NOT_EXPORTED);
+            else ctx.registerReceiver(r, f);
         } catch (Exception e) { Log.w(TAG, "power watch", e); }
     }
 
@@ -610,6 +640,7 @@ final class Core {
 
     void endMaintenance() {
         prefs.setMaintenanceUntil(0);
+        touched();   // touches in Android settings never reached the kiosk: do not go black a minute later at night
         applyAwake();
         Policy.applyKioskPolicies(ctx);
         bringToFront();
@@ -617,7 +648,9 @@ final class Core {
 
     private void checkMaintenanceExpiry() {
         long until = prefs.maintenanceUntil();
-        if (until > 0 && System.currentTimeMillis() >= until) {
+        long now = System.currentTimeMillis();
+        // also when the clock was set backwards: maintenance never lasts longer than 10 minutes from "now"
+        if (until > 0 && (now >= until || until - now > Config.MAINTENANCE_MS + 60_000L)) {
             reportEvent("maintenance ended (auto)");
             endMaintenance();
         }
