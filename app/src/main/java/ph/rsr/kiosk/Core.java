@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.net.wifi.WifiManager;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -159,6 +160,7 @@ final class Core {
 
     void start() {
         bg.removeCallbacksAndMessages(null);
+        watchPower();
         bg.post(this::loop);
         scheduleNextAlarm();
         scheduleReportAlarm();
@@ -196,6 +198,7 @@ final class Core {
 
     private void loop() {
         try {
+            applyAwake();
             beat();
             checkMaintenanceExpiry();
             checkScheduleTransition();
@@ -386,6 +389,9 @@ final class Core {
             lastOnHours = onHours;
         }
         if (changed && onHours) { wakeScreen(); return; }
+        // Maintenance: the office is in Android settings, where touches do not reach the kiosk's idle timer.
+        // Never turn the screen off under them (2026-11-04).
+        if (prefs.inMaintenance()) return;
         PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
         if (pm == null || !pm.isInteractive()) return;
         int limitMin;
@@ -482,11 +488,92 @@ final class Core {
         });
     }
 
+    // ---- stay reachable with the screen off (see Awake) ----------------------------------------
+
+    private Awake awake;
+    private boolean powerWatched;
+
+    private synchronized Awake awake() {
+        if (awake == null) awake = buildAwake();
+        return awake;
+    }
+
+    @SuppressWarnings("deprecation")
+    private Awake buildAwake() {
+        Awake.Lock none = new Awake.Lock() {
+            public void acquire() { }
+            public void release() { }
+            public boolean held() { return false; }
+        };
+        Awake.Lock cpu = none, wifi = none, screen = none;
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                cpu = wakeLock(pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:net"));
+                screen = wakeLock(pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK
+                        | PowerManager.ON_AFTER_RELEASE, "rsr:maint"));
+            }
+        } catch (Exception e) { Log.w(TAG, "wakelock", e); }
+        try {
+            WifiManager wm = (WifiManager) ctx.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                final WifiManager.WifiLock w = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "rsr:wifi");
+                w.setReferenceCounted(false);
+                wifi = new Awake.Lock() {
+                    public void acquire() { w.acquire(); }
+                    public void release() { w.release(); }
+                    public boolean held() { return w.isHeld(); }
+                };
+            }
+        } catch (Exception e) { Log.w(TAG, "wifilock", e); }
+        return new Awake(cpu, wifi, screen);
+    }
+
+    private static Awake.Lock wakeLock(final PowerManager.WakeLock l) {
+        l.setReferenceCounted(false);
+        return new Awake.Lock() {
+            public void acquire() { l.acquire(); }
+            public void release() { l.release(); }
+            public boolean held() { return l.isHeld(); }
+        };
+    }
+
+    /** Charger connected (the "charging" flag in the heartbeat is the same reading). */
+    private boolean plugged() {
+        try {
+            Intent b = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            return b != null && b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    void applyAwake() {
+        try { awake().apply(plugged(), prefs.inMaintenance()); } catch (Throwable t) { Log.w(TAG, "awake", t); }
+    }
+
+    /** Plug / unplug: re-apply at once (an unplugged tablet asleep would otherwise wait for its next wake). */
+    private void watchPower() {
+        synchronized (this) {
+            if (powerWatched) return;
+            powerWatched = true;
+        }
+        try {
+            IntentFilter f = new IntentFilter(Intent.ACTION_POWER_CONNECTED);
+            f.addAction(Intent.ACTION_POWER_DISCONNECTED);
+            ctx.registerReceiver(new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent i) { bg.post(Core.this::applyAwake); }
+            }, f);
+        } catch (Exception e) { Log.w(TAG, "power watch", e); }
+    }
+
     // ---- maintenance + updates ----------------------------------------------------------------
 
     void startMaintenance() {
         long until = System.currentTimeMillis() + Config.MAINTENANCE_MS;
         prefs.setMaintenanceUntil(until);
+        applyAwake();   // screen stays on for the 10 minutes (Android's own timeout must not cut the tablet off)
         Policy.relaxForMaintenance(ctx);
         reportEvent("maintenance opened");
         bg.postDelayed(this::checkMaintenanceExpiry, Config.MAINTENANCE_MS + 2000);
@@ -523,6 +610,7 @@ final class Core {
 
     void endMaintenance() {
         prefs.setMaintenanceUntil(0);
+        applyAwake();
         Policy.applyKioskPolicies(ctx);
         bringToFront();
     }
