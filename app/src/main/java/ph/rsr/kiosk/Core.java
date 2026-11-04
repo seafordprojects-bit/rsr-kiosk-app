@@ -39,6 +39,8 @@ final class Core {
         boolean pageOk();
         /** Ask the kiosk page to sync now (punch queues + its own heartbeat). Main thread. */
         void nudgePage();
+        /** Office pressed Screen on: undim the backlight and lift the page's black screen. Main thread. */
+        void wakeAndBrighten();
         /** Is a worker in the middle of a punch (employee selected / dialog open)? Main thread; answers async. */
         void pageBusy(java.util.function.Consumer<Boolean> answer);
     }
@@ -322,7 +324,10 @@ final class Core {
                 ack(id, Updater.checkAndInstall(ctx, () -> !inRush() && safeNow(30)));
                 break;
             case "screen_on":
-                wakeScreen();
+                touched();   // at once: the night / evening idle screen-off counts from this press
+                if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreen();
+                // The display may already be on but dimmed to 1% with the page black (idle saver): lift both.
+                main.postDelayed(() -> { Host h = host.get(); if (h != null) h.wakeAndBrighten(); }, 500);
                 ack(id, "done");
                 break;
             case "screen_off":

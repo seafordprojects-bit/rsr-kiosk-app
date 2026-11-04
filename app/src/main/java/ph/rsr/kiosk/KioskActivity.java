@@ -459,6 +459,20 @@ public class KioskActivity extends Activity implements Core.Host {
     }
 
     @Override
+    public void wakeAndBrighten() {
+        lastTouchAt = SystemClock.elapsedRealtime();   // the 6-minute dim timer starts again, like a touch
+        Core.get(this).touched();   // and the night / evening idle screen-off counts from now, not from the last real touch
+        if (backlightLow) setBacklightLow(false);
+        if (web == null || mainFrameError) return;
+        // kiosk/index.html's own black screen, lifted ONLY when it is black (nobody can be mid-punch behind it).
+        // An awake page just restarts its dim timer: its wakeScreen() re-checks the camera, which must never
+        // run under a worker taking a punch photo. Guarded so an older page is not an error.
+        web.evaluateJavascript("(function(){try{if(typeof screenBlack!=='undefined'&&screenBlack){"
+                + "if(typeof wakeScreen==='function')wakeScreen();}"
+                + "else if(typeof resetDimTimer==='function')resetDimTimer();}catch(e){}})()", null);
+    }
+
+    @Override
     public void nudgePage() {
         if (web == null || mainFrameError) return;
         // Functions of the RSR kiosk page (kiosk/index.html). Each is guarded inside the page

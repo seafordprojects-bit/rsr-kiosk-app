@@ -111,6 +111,23 @@ public class AwakeTest {
         int clear = boot.indexOf("setMaintenanceUntil(0)"), app = boot.indexOf("applyAwake()", Math.max(clear, 0));
         ok(clear >= 0 && app > clear, "after a reboot during maintenance the screen lock is released at once");
 
+        System.out.println("Remote Screen on really lights the kiosk (2026-11-04 12:28: panel said Screen On, tablet looked off)");
+        String cmd = core.substring(core.indexOf("case \"screen_on\":"));
+        cmd = cmd.substring(0, cmd.indexOf("break;"));
+        ok(cmd.contains("wakeAndBrighten()"), "screen_on command wakes the page, not only the display");
+        String act = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java"));
+        String wb = body(act, "public void wakeAndBrighten()");
+        ok(wb.contains("setBacklightLow(false)"), "it turns the dimmed backlight (1%) back up");
+        ok(wb.contains("lastTouchAt"), "it restarts the 6-minute dim timer (otherwise it dims again within 30 s)");
+        ok(wb.contains("wakeScreen()") && wb.contains("typeof wakeScreen"), "it lifts the page's own black screen (kiosk/index.html wakeScreen), guarded if missing");
+        String js = wb.substring(Math.max(0, wb.indexOf("evaluateJavascript")));   // the script, not the comments
+        ok(js.indexOf("screenBlack") >= 0 && js.indexOf("screenBlack") < js.indexOf("wakeScreen()"),
+                "the page is woken ONLY when it is black (an awake page may be mid-punch: its camera check must not run)");
+        ok(cmd.indexOf("touched()") >= 0 && cmd.indexOf("touched()") < cmd.indexOf("wakeScreen"),
+                "the press counts as a touch at once, before anything else (no half-second gap for the night screen-off)");
+        ok(cmd.contains("wakeScreenOnly()"), "during maintenance Screen on does not pull the kiosk over Android settings");
+        ok(!body(core, "void reportWake()").contains("wakeAndBrighten"), "roll-call report wakes do NOT light the page (only push punches)");
+
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
     }
