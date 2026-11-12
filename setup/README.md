@@ -1,6 +1,6 @@
 # Setup copy of the RSR Kiosk app
 
-`rsr-kiosk.apk` here is a fixed copy of a released build (build-12, 2026-11-12) for **QR setup** of a new phone/tablet:
+`rsr-kiosk.apk` here is a fixed copy of a released build (build-13, 2026-11-12) for **QR setup** of a new phone/tablet:
 GitHub Pages serves it at one direct address (https://seafordprojects-bit.github.io/rsr-kiosk-app/setup/rsr-kiosk.apk),
 without the two redirects of the Releases link, which some phones fail on during setup.
 
