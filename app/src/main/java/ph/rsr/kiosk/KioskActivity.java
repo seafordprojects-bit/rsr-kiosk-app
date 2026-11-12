@@ -57,10 +57,9 @@ public class KioskActivity extends Activity implements Core.Host {
     private PermissionRequest pendingCamRequest;
     private long lastTouchAt = SystemClock.elapsedRealtime();
     private boolean backlightLow = false;
-    /** The kiosk page blacks itself out after 6 min without a touch (5 min dim + 60 s). Shortly after
-     *  that the app turns the real backlight down too: the page is black, so nobody sees a difference,
-     *  but the screen light was the biggest battery user. The next touch brings it back. */
-    private static final long BACKLIGHT_LOW_AFTER_MS = 6 * 60_000L + 15_000L;
+    /** The kiosk page blacks itself out after 5 min without a touch (2 min dim + 3 min, owner 2026-11-12). 15 s
+     *  later the app turns the real backlight down too (Awake.BACKLIGHT_LOW_AFTER_MS). The next touch brings it back. */
+    private static final long BACKLIGHT_LOW_AFTER_MS = Awake.BACKLIGHT_LOW_AFTER_MS;
     private int cornerTaps = 0;
     private long firstCornerTap = 0;
     private ConnectivityManager.NetworkCallback netCb;
@@ -576,7 +575,7 @@ public class KioskActivity extends Activity implements Core.Host {
 
     @Override
     public void wakeAndBrighten() {
-        lastTouchAt = SystemClock.elapsedRealtime();   // the 6-minute dim timer starts again, like a touch
+        lastTouchAt = SystemClock.elapsedRealtime();   // the 5-minute dark timer starts again, like a touch
         Core.get(this).touched();   // and the night / evening idle screen-off counts from now, not from the last real touch
         if (backlightLow) setBacklightLow(false);
         if (web == null || mainFrameError) return;

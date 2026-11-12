@@ -35,6 +35,23 @@ final class Awake {
         return keepingUp || levelPct >= 50;
     }
 
+    /** The kiosk page (kiosk/index.html v2026-11-12b) dims after 2 min without a touch and goes black at 5 min
+     *  (owner 2026-11-12). Keep in step with DIM_AFTER_MS + BLACK_AFTER_MS there. */
+    static final long PAGE_BLACK_AFTER_MS = 5 * 60_000L;
+    /** The app turns the real backlight down 15 s after the page is black: nobody sees a difference, and the
+     *  screen light is the biggest battery user. The next touch brings it back. */
+    static final long BACKLIGHT_LOW_AFTER_MS = PAGE_BLACK_AFTER_MS + 15_000L;
+
+    /**
+     * A report wake (8 and 2 min before the 10:01, 3:00 and 7:10 roll-call reports) must push the waiting punches.
+     * It lights the screen ONLY when that is the one way to get Wi-Fi back: screen off AND on battery (deep sleep).
+     * On the charger the CPU + Wi-Fi locks keep the page running, and a screen that is on (dimmed in the day) already
+     * has Wi-Fi - so the screen stays dark (owner 2026-11-12: "the kiosk keeps on waking").
+     */
+    static boolean reportNeedsScreen(boolean screenOn, boolean onCharger) {
+        return !screenOn && !onCharger;
+    }
+
     synchronized void apply(boolean plugged, boolean maintenance) {
         boolean net = plugged || maintenance;
         set(cpu, net);

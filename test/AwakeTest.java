@@ -183,6 +183,20 @@ public class AwakeTest {
         ok(shot.contains("waitUntilSafe(20, 60)"), "waits at most 60 s, so the heartbeat is not held up for minutes");
         ok(act.contains("bot***") && act.contains("ERR_"), "page errors: bot token / keys redacted, network noise (net::ERR_) skipped");
 
+        // 2026-11-12 (owner): screen dims after 2 min, dark after 5 min; on the charger the report wakes stay dark.
+        System.out.println("Screen sleep 2 / 5 min and dark report wakes (owner 2026-11-12)");
+        ok(Awake.PAGE_BLACK_AFTER_MS == 5 * 60_000L, "the kiosk page goes black after 5 min without a touch (2 min dim + 3 min)");
+        ok(Awake.BACKLIGHT_LOW_AFTER_MS == 5 * 60_000L + 15_000L, "the backlight goes down 15 s after the page is black (5 min 15 s)");
+        ok(!Awake.reportNeedsScreen(true, true), "report wake, screen on (dimmed day screen), on charger: do NOT light it");
+        ok(!Awake.reportNeedsScreen(true, false), "report wake, screen on, on battery: Wi-Fi is up, do NOT light it");
+        ok(!Awake.reportNeedsScreen(false, true), "report wake, screen off, on charger: CPU + Wi-Fi locks hold, do NOT light it");
+        ok(Awake.reportNeedsScreen(false, false), "report wake, screen off, on battery (deep sleep): light it so Wi-Fi comes back");
+        String rw = body(core, "void reportWake()");
+        ok(rw.contains("Awake.reportNeedsScreen(") && !rw.matches("(?s).*\\n\\s*wakeScreen\\(\\);.*"), "Core.reportWake lights the screen only through Awake.reportNeedsScreen");
+        ok(rw.contains("nudgePage"), "Core.reportWake still pushes the waiting punches either way");
+        String act2 = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java"));
+        ok(act2.contains("Awake.BACKLIGHT_LOW_AFTER_MS") && !act2.contains("6 * 60_000L + 15_000L"), "KioskActivity uses Awake.BACKLIGHT_LOW_AFTER_MS (no old 6-minute copy)");
+
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
     }

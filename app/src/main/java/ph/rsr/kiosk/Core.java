@@ -150,16 +150,20 @@ final class Core {
         else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
     }
 
-    /** Alarm fired: wake the screen, keep the CPU up for 90 s, push waiting punches, send heartbeats. */
+    /** Alarm fired: keep the CPU up for 90 s, push waiting punches, send heartbeats. The screen is lit only when
+     *  that is the one way to get Wi-Fi back (screen off on battery, see Awake.reportNeedsScreen). */
     void reportWake() {
+        boolean screenOn = true;
         try {
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
             PowerManager.WakeLock cpu = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:report");
             cpu.acquire(90_000);
+            screenOn = pm.isInteractive();
         } catch (Exception e) {
             Log.w(TAG, "report wakelock", e);
+            screenOn = false;   // unknown: take the old, safe path (light it)
         }
-        wakeScreen();
+        if (Awake.reportNeedsScreen(screenOn, plugged())) wakeScreen();
         main.postDelayed(() -> { Host h = host.get(); if (h != null) { if (!h.pageOk()) h.reloadPage(false); else h.nudgePage(); } }, 3000);
         // a second push 30 s later, after Wi-Fi has had time to reconnect from sleep
         main.postDelayed(() -> { Host h = host.get(); if (h != null) h.nudgePage(); }, 33_000);
