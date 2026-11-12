@@ -139,7 +139,10 @@ public class KioskActivity extends Activity implements Core.Host {
                 mainFrameError = false;
                 loading = true;
                 hangAskedAt = 0;
-                if (backlightLow) setBacklightLow(false);   // a fresh page is never left on a dark screen   // a navigation drops a pending hang check; never blame the new page for it
+                // (2026-11-12) a reload no longer lifts the backlight: the page checks for a new version every minute and
+                // reloads by itself (plus hang reloads), and each one lit an idle tablet for up to 30 s ("the kiosk keeps
+                // on waking", owner). Only a touch, the office's Screen on / Screenshot, or the ON time lift it.
+                // A navigation drops a pending hang check; never blame the new page for it.
                 if (url != null) lastUrl = url;
             }
 

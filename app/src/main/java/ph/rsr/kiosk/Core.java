@@ -150,20 +150,19 @@ final class Core {
         else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
     }
 
-    /** Alarm fired: keep the CPU up for 90 s, push waiting punches, send heartbeats. The screen is lit only when
-     *  that is the one way to get Wi-Fi back (screen off on battery, see Awake.reportNeedsScreen). */
+    /** Alarm fired: wake the screen, keep the CPU up for 90 s, push waiting punches, send heartbeats.
+     *  (Review 2026-11-12: kept as it was. In the day the screen is already on with the backlight at 1% and the
+     *  window brightness wins over this wake lock, so it does not light the tablet; and it still brings the kiosk
+     *  to the front when Android has dropped it, before the roll-call push.) */
     void reportWake() {
-        boolean screenOn = true;
         try {
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
             PowerManager.WakeLock cpu = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:report");
             cpu.acquire(90_000);
-            screenOn = pm.isInteractive();
         } catch (Exception e) {
             Log.w(TAG, "report wakelock", e);
-            screenOn = false;   // unknown: take the old, safe path (light it)
         }
-        if (Awake.reportNeedsScreen(screenOn, plugged())) wakeScreen();
+        wakeScreen();
         main.postDelayed(() -> { Host h = host.get(); if (h != null) { if (!h.pageOk()) h.reloadPage(false); else h.nudgePage(); } }, 3000);
         // a second push 30 s later, after Wi-Fi has had time to reconnect from sleep
         main.postDelayed(() -> { Host h = host.get(); if (h != null) h.nudgePage(); }, 33_000);
