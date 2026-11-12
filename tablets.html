@@ -197,7 +197,7 @@ function render(rows) {
   if (!rows.length) { L.innerHTML = '<div class="card">No tablet is running the RSR Kiosk app yet.</div>'; return; }
   L.innerHTML = rows.map(t => {
     // Roll-call phone (2026-11-12): same rule as Mode.java / kiosk_app_is_phone. Offline in the yard is normal.
-    const phone = /^https:\/\/seafordprojects-bit\.github\.io\/[^?#]*\/monitoring\//i.test(t.page_url || '');
+    const phone = t.phone === true || /^https:\/\/seafordprojects-bit\.github\.io\/[^?#]+\/monitoring\//i.test(t.page_url || '');
     const color = t.online ? 'var(--ok)' : (t.asleep || phone) ? 'var(--mute)' : 'var(--bad)';
     const batt = t.battery == null ? '-' : t.battery + '%' + (t.charging ? ' (charging)' : ' (NOT charging)');
     const battColor = (t.battery != null && t.battery <= 20 && !t.charging) || t.charging === false ? 'var(--warn)' : 'inherit';

@@ -61,6 +61,7 @@ alter table public.kiosk_app_devices add column if not exists page_version      
 alter table public.kiosk_app_devices add column if not exists page_error        text;
 alter table public.kiosk_app_devices add column if not exists page_error_at     timestamptz;
 alter table public.kiosk_app_devices add column if not exists shot_at           timestamptz;
+alter table public.kiosk_app_devices add column if not exists phone_mode        boolean not null default false;
 create table if not exists public.kiosk_app_shots (
   device_id  text primary key,
   taken_at   timestamptz not null default now(),
@@ -258,6 +259,7 @@ begin
            'page_version', k.page_version, 'page_error', k.page_error, 'page_error_at', k.page_error_at, 'shot_at', k.shot_at,
            'drain_on', case when k.drain_on_n >= 3 then k.drain_on end, 'drain_off', case when k.drain_off_n >= 3 then k.drain_off end,
            'asleep', not public.kiosk_app_awake_now(k.sched_on, k.sched_off),
+           'phone', k.phone_mode or public.kiosk_app_is_phone(k.page_url),
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
            'pending', (k.cmd_id is not null and k.cmd_id > coalesce(k.cmd_done_id,0) and k.cmd_at > now() - interval '30 minutes'),
            'events', (select coalesce(jsonb_agg(jsonb_build_object('event', e.event, 'at', e.at) order by e.at desc), '[]'::jsonb)
@@ -460,7 +462,7 @@ returns jsonb language sql stable security definer set search_path = public as $
       from public.kiosk_app_devices k
       cross join lateral (select public.kiosk_app_power_state(k.power_windows,
             (extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila')))::int) as state) st
-     where not public.kiosk_app_is_phone(k.page_url)) x
+     where not (k.phone_mode or public.kiosk_app_is_phone(k.page_url))) x
 $$;
 revoke all on function public.kiosk_app_status() from public;
 grant execute on function public.kiosk_app_status() to anon, authenticated;
@@ -488,7 +490,12 @@ begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
   for r in select * from public.kiosk_app_devices loop
     v_name := coalesce(nullif(r.name,''), r.device_id);
-    v_phone := public.kiosk_app_is_phone(r.page_url);
+    v_phone := case when public.kiosk_app_is_phone(r.page_url) then true
+                    when lower(coalesce(r.page_url, '')) like 'https://seafordprojects-bit.github.io/%/kiosk/%' then false
+                    else r.phone_mode end;
+    if v_phone is distinct from r.phone_mode then
+      update public.kiosk_app_devices set phone_mode = v_phone where device_id = r.device_id;
+    end if;
     if v_phone then
       if r.last_seen > now() - interval '10 minutes' then
         if r.battery_temp is not null and r.battery_temp >= 45 and not r.hot_alerted then
@@ -497,6 +504,14 @@ begin
           update public.kiosk_app_devices set hot_alerted = true where device_id = r.device_id;
         elsif r.hot_alerted and coalesce(r.battery_temp, 0) < 40 then
           update public.kiosk_app_devices set hot_alerted = false where device_id = r.device_id;
+        end if;
+        if r.weak_since is not null and r.weak_since < now() - interval '15 minutes' and not r.weak_alerted then
+          perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is PLUGGED IN but NOT taking charge for '
+                  || public.kiosk_app_dur(now() - r.weak_since) || ' (battery ' || coalesce(r.battery::text,'?')
+                  || '%). Check the charger and cable.');
+          update public.kiosk_app_devices set weak_alerted = true where device_id = r.device_id;
+        elsif r.weak_since is null and r.weak_alerted then
+          update public.kiosk_app_devices set weak_alerted = false where device_id = r.device_id;
         end if;
         if r.charging is false and r.battery is not null then
           if r.battery <= 10 and r.batt_step > 10 then
@@ -512,8 +527,10 @@ begin
           update public.kiosk_app_devices set batt_step = 100, low_batt_alerted = false where device_id = r.device_id;
         end if;
       end if;
-      update public.kiosk_app_devices set offline_first_at = null, unplugged_alerted = false, unplugged_alerted_at = null
-       where device_id = r.device_id and (offline_first_at is not null or unplugged_alerted);
+      if r.offline_first_at is not null or r.unplugged_alerted then
+        update public.kiosk_app_devices set offline_first_at = null, unplugged_alerted = false, unplugged_alerted_at = null
+         where device_id = r.device_id;
+      end if;
       continue;
     end if;
     v_on  := public.kiosk_app_hhmm(r.sched_on);

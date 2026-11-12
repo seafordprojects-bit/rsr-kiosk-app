@@ -147,9 +147,11 @@ address and switches to **phone mode** by itself:
 6. Open the hidden settings (tap the **top-right corner 5 times** quickly; on roll-call this may also open the Menu - that is fine), enter the exit passcode, and set
    **Kiosk page address** to
    `https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html?site=Carmen` and press **Save**.
-7. Roll-call opens. Sign in (carmen@ account) and type the **roll-call passcode** on office Wi-Fi.
-   The phone ID changed with the reset, so first press **Admin > Settings > Roll-call phones > reset Carmen**, then unlock on the phone.
-8. Unplug the cable; turn USB debugging OFF (hidden settings > Open Wi-Fi / Android settings > Developer options).
+7. On the PC: **Admin > Settings > Roll-call phones > reset Carmen** (the reset gave the phone a new ID, so the old registration must go first).
+8. Roll-call opens on the phone. Sign in (carmen@ account) and type the **roll-call passcode** on office Wi-Fi. The phone becomes the Carmen roll-call phone again.
+9. Unplug the cable; turn USB debugging OFF (hidden settings > Open Wi-Fi / Android settings > Developer options).
+
+If this Motorola ran RSR Kiosk before (a second setup), press **Forget tablet** for it on the RSR Tablets page first (section 8b).
 
 ### Check (visual confirmation)
 - Home, Back and Recents do nothing; the notification bar does not pull down.

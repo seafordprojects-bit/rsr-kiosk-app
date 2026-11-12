@@ -25,6 +25,7 @@ final class Mode {
         int q = u.indexOf('?'), h = u.indexOf('#');
         if (q >= 0) cut = Math.min(cut, q);
         if (h >= 0) cut = Math.min(cut, h);
-        return u.substring(prefix.length() - 1, cut).contains("/monitoring/");
+        // path after the host must be "<folder>/.../monitoring/..." (same rule as SQL kiosk_app_is_phone)
+        return u.substring(prefix.length() - 1, cut).indexOf("/monitoring/") > 0;
     }
 }

@@ -384,6 +384,23 @@ ok((await q(`select batt_step from kiosk_app_devices where device_id='app-ph1'`)
    'phone charging: steps reset quietly, no back-ONLINE / charging-again message');
 const PST=(await q(`select public.kiosk_app_status() r`))[0].r;
 ok(!PST.some(x=>x.name==="Carmen roll-call phone") && PST.length>0,'dashboard charging banner leaves the phone out, tablets stay');
+// phone stays a phone when it briefly shows another page or no page yet; a /kiosk/ page makes it a tablet again
+await beat({device_id:'app-ph1',battery:15,charging:true,page_url:'https://seafordprojects-bit.github.io/rsr-engineering/index.html'});
+await q(`update kiosk_app_devices set last_seen=now()-interval '3 hours' where device_id='app-ph1'`); await q(`select public.kiosk_app_tick()`);
+await q(`update kiosk_app_devices set page_url=null, last_seen=now()-interval '3 hours' where device_id='app-ph1'`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone%OFFLINE%'`))[0].n===0 &&
+   (await q(`select phone_mode from kiosk_app_devices where device_id='app-ph1'`))[0].phone_mode===true,'phone showing another RSR page / no page: still a phone, no OFFLINE');
+const LP=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id==='app-ph1');
+ok(LP && LP.phone===true,'Tablets page list marks it as phone');
+// weak charger on the phone: plugged in but not taking charge 15 min -> one alert
+await beat({device_id:'app-ph1',battery:40,charging:true,charge_state:'discharging',page_url:RC});
+await q(`update kiosk_app_devices set weak_since=now()-interval '20 minutes' where device_id='app-ph1'`);
+await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone is PLUGGED IN but NOT taking charge%'`))[0].n===1,'phone weak charger: one alert');
+await beat({device_id:'app-ph1',battery:50,charging:true,page_url:'https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen'});
+await q(`select public.kiosk_app_tick()`);
+ok((await q(`select phone_mode from kiosk_app_devices where device_id='app-ph1'`))[0].phone_mode===false,'re-pointed to /kiosk/ = tablet again');
+await q(`delete from kiosk_app_devices where device_id='app-ph1'`);
 await q(`delete from sent`);
 
 // anon cannot read tables

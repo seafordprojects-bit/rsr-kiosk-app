@@ -96,7 +96,8 @@ public class SettingsActivity extends Activity {
         CheckBox sched = new CheckBox(this);
         sched.setText("Turn screen off at night");
         sched.setTextSize(18);
-        sched.setChecked(prefs.scheduleEnabled());
+        sched.setChecked(prefs.scheduleStored());   // phone mode ignores it but must not overwrite it
+        if (prefs.phone()) note("Roll-call phone: no screen schedule (screen turns off after 1 minute). Kept for when this device is a kiosk again.");
         box.addView(sched);
         EditText on = field("Screen ON time (HH:MM)", prefs.onTime(), InputType.TYPE_CLASS_DATETIME | InputType.TYPE_DATETIME_VARIATION_TIME);
         EditText off = field("Screen OFF time (HH:MM)", prefs.offTime(), InputType.TYPE_CLASS_DATETIME | InputType.TYPE_DATETIME_VARIATION_TIME);
@@ -108,7 +109,10 @@ public class SettingsActivity extends Activity {
             boolean urlChanged = !u.equals(prefs.url());
             prefs.setName(name.getText().toString().trim());
             prefs.setUrl(u);
-            core.applyScheduleArg(sched.isChecked() ? on.getText().toString().trim() + "-" + off.getText().toString().trim() : "off");
+            // Roll-call phone: leave the saved tablet schedule alone (an unticked box here must never turn
+            // a later kiosk's night schedule off).
+            if (!Mode.isPhoneUrl(u)) core.applyScheduleArg(sched.isChecked() ? on.getText().toString().trim() + "-" + off.getText().toString().trim() : "off");
+            if (urlChanged) { core.scheduleNextAlarm(); core.scheduleReportAlarm(); }   // phone <-> kiosk: re-plan wake-ups
             core.beatSoon();
             toast("Saved");
             if (urlChanged) startActivity(new Intent(this, KioskActivity.class).putExtra("reload_url", true).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));

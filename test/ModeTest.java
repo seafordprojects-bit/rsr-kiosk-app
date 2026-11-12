@@ -27,6 +27,7 @@ public class ModeTest {
         ok(!Mode.isPhoneUrl(null), "no address = tablet (safe default)");
         ok(!Mode.isPhoneUrl(""), "empty address = tablet");
         ok(!Mode.isPhoneUrl("https://evil.example/monitoring/roll-call.html"), "other site never = phone");
+        ok(!Mode.isPhoneUrl("https://seafordprojects-bit.github.io/monitoring/x.html"), "no repo folder = tablet (same as the server rule)");
         ok(Mode.PHONE_SCREEN_TIMEOUT_MS == 60_000, "phone screen turns off after 1 min without a touch");
         System.out.println(passes + " passed, " + fails + " failed");
         if (fails > 0) System.exit(1);

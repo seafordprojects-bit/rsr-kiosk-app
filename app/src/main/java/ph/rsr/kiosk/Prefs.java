@@ -33,6 +33,8 @@ final class Prefs {
     String offTime() { return sp.getString("off", Config.DEFAULT_OFF); }
     /** A roll-call phone never has a screen schedule: Android's own 1-min timeout turns its screen off. */
     boolean scheduleEnabled() { return !phone() && sp.getBoolean("sched", true); }
+    /** The tablet schedule as saved (also while in phone mode, where it is ignored), for the Settings screen. */
+    boolean scheduleStored() { return sp.getBoolean("sched", true); }
     void setSchedule(String on, String off, boolean enabled) {
         sp.edit().putString("on", on).putString("off", off).putBoolean("sched", enabled).apply();
     }
