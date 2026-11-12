@@ -15,6 +15,12 @@ final class Mode {
 
     static final long PHONE_SCREEN_TIMEOUT_MS = 60_000L;
 
+    /** Roll-call phone (owner 2026-11-12): only Job Monitoring pages may open; any other RSR page (main menu,
+     *  coordinator, issuance) is refused and the phone goes back to its saved page. Tablets: never. */
+    static boolean phoneBlocks(String savedUrl, String target) {
+        return target != null && isPhoneUrl(savedUrl) && !isPhoneUrl(target);
+    }
+
     /** True for an RSR Job Monitoring page (path contains /monitoring/). Query and #hash are ignored. */
     static boolean isPhoneUrl(String url) {
         if (url == null) return false;

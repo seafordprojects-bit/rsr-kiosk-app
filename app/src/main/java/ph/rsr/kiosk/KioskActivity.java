@@ -131,7 +131,16 @@ public class KioskActivity extends Activity implements Core.Host {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
-                return !allowed(r.getUrl());   // block every site that is not RSR's
+                if (!allowed(r.getUrl())) return true;   // block every site that is not RSR's
+                // Roll-call phone: only Job Monitoring pages; another RSR page sends it back to its own page.
+                if (r.isForMainFrame() && Mode.phoneBlocks(prefs.url(), r.getUrl().toString())) {
+                    // Already on a Job Monitoring page: just stay (no reload, no lost input, no loop).
+                    if (Mode.isPhoneUrl(v.getUrl())) return true;
+                    final String home = prefs.url();
+                    v.post(() -> { if (web == v) v.loadUrl(home); });
+                    return true;
+                }
+                return false;
             }
 
             @Override
