@@ -117,6 +117,46 @@ so first press **Forget tablet** for it on the RSR Tablets page; it registers ag
   is using the kiosk, or press **Update app** on the RSR Tablets page. Update, restart and reload are refused during
   punch rushes (6:50-8:15, 11:50-1:10, 4:50-6:10) and wait until nobody is mid-punch. No tapping on the tablet.
 
+## 10. Roll-call phone (Motorola moto g power XT2515V, Wi-Fi only) - 2026-11-12
+
+The yard roll-call phone runs the same RSR app, locked to the roll-call page. The app sees the roll-call
+address and switches to **phone mode** by itself:
+- the screen turns off after **1 minute** without a touch (battery lasts the day); the power button wakes it straight into roll-call, no lock screen;
+- no screen schedule and no 10:01 / 3:00 / 7:10 wake-ups (those are for the kiosk tablets);
+- Telegram (RSR Kiosk Alerts) only for **battery LOW 20%** and **CRITICAL 10%** (plus HOT 45 C / weak charger), sent when the phone is on Wi-Fi.
+  No OFFLINE or NOT CHARGING alerts: it is offline in the yard on purpose. "Not synced by 7:30 PM" and
+  "not seen 2 days" come from the roll-call page itself.
+- On the RSR Tablets page it shows as **"roll-call phone"**, grey (not red) when it is away from Wi-Fi.
+
+### Before you start
+1. On office Wi-Fi open roll-call on the Motorola and check the bar says **All sent ✓** (nothing waiting). The reset erases the phone.
+2. Do it after the last roll-call of the day.
+
+### Steps (same as sections 2-6, Motorola menus)
+1. **Reset**: Settings > System > Reset options > **Erase all data (factory reset)**.
+2. Welcome setup: connect to the **office Wi-Fi**; **skip** the Google account (and any Verizon / Motorola account screens). No account may be added.
+3. **USB debugging**: Settings > About phone > tap **Build number** 7 times; Settings > System > Developer options > **USB debugging ON**; plug into the laptop, tap **Allow**.
+4. On the laptop (PowerShell, `C:\platform-tools`), same as section 5:
+   ```powershell
+   .\adb devices
+   .\adb install rsr-kiosk.apk
+   .\adb shell dpm set-device-owner ph.rsr.kiosk/.AdminReceiver
+   ```
+   Expected last line: `Success: Device owner set to package ph.rsr.kiosk`.
+5. Open **RSR Kiosk**. Name: `Carmen roll-call phone`. Exit passcode: 6-10 digits (keep it safe).
+6. Open the hidden settings (tap the **top-right corner 5 times** quickly; on roll-call this may also open the Menu - that is fine), enter the exit passcode, and set
+   **Kiosk page address** to
+   `https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html?site=Carmen` and press **Save**.
+7. Roll-call opens. Sign in (carmen@ account) and type the **roll-call passcode** on office Wi-Fi.
+   The phone ID changed with the reset, so first press **Admin > Settings > Roll-call phones > reset Carmen**, then unlock on the phone.
+8. Unplug the cable; turn USB debugging OFF (hidden settings > Open Wi-Fi / Android settings > Developer options).
+
+### Check (visual confirmation)
+- Home, Back and Recents do nothing; the notification bar does not pull down.
+- Leave it 1 minute: the screen turns off. Press power: roll-call is back, no lock screen.
+- Roll-call shows **v2026-11-10a** and **All sent ✓**. Turn Wi-Fi off: it still opens and taps wait; Wi-Fi on: they send.
+- RSR Tablets page: **Carmen roll-call phone - roll-call phone - Online**, with its battery %.
+
 ## Signing key (keep safe)
 
 All builds are signed with one key. GitHub has it locked (secret `KEYSTORE_PASSWORD`). Keep the backup

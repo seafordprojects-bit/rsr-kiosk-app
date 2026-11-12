@@ -142,6 +142,8 @@ final class Core {
         if (am == null) return;
         Intent i = new Intent(ctx, ScheduleReceiver.class).setAction(ScheduleReceiver.ACTION_REPORT_WAKE);
         PendingIntent pi = PendingIntent.getBroadcast(ctx, 9, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        // Roll-call phone: no kiosk punches to push, and waking a phone on battery 6x a day wastes it.
+        if (prefs.phone()) { am.cancel(pi); return; }
         long next = Long.MAX_VALUE;
         for (String t : Config.REPORT_WAKE_TIMES) next = Math.min(next, nextAt(t));
         if (next == Long.MAX_VALUE) return;

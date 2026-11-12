@@ -356,6 +356,36 @@ await beat({device_id:'app-tk1',token:t1.token,page_error:'future',page_error_at
 ok((await q(`select page_error_at<=now() f from kiosk_app_devices where device_id='app-tk1'`))[0].f===true,'error time never in the future');
 await q(`select public.kiosk_app_forget('123456','app-tk1')`);
 ok((await q(`select count(*)::int n from kiosk_app_shots where device_id='app-tk1'`))[0].n===0,'forget tablet also deletes its screenshot');
+// ROLL-CALL PHONE (owner 2026-11-12): page = Job Monitoring -> no OFFLINE / NOT CHARGING, battery only 20% + 10%
+const RC='https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html?site=Carmen';
+ok((await q(`select public.kiosk_app_is_phone($1) a, public.kiosk_app_is_phone($2) b, public.kiosk_app_is_phone(null) c, public.kiosk_app_is_phone($3) d`,
+   [RC,'https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Mandaue','https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?x=/monitoring/'])).map(x=>[x.a,x.b,x.c,x.d].join())[0]==='true,false,false,false',
+   'phone = Job Monitoring page only (kiosk, empty, query trick = tablet)');
+await q(`delete from sent`);
+await beat({device_id:'app-ph1',name:'Carmen roll-call phone',battery:60,charging:false,screen_on:false,page_url:RC});
+await q(`update kiosk_app_devices set unplugged_since=now()-interval '3 hours' where device_id='app-ph1'`);
+await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone%'`))[0].n===0,'phone on battery 60%: no NOT CHARGING, no 50% step');
+await beat({device_id:'app-ph1',battery:45,charging:false,page_url:RC}); await q(`select public.kiosk_app_tick()`);
+await beat({device_id:'app-ph1',battery:28,charging:false,page_url:RC}); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone%'`))[0].n===0,'phone 45% / 28%: still quiet (no 50/30 steps)');
+await beat({device_id:'app-ph1',battery:19,charging:false,page_url:RC}); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+let PH=(await q(`select msg from sent where msg like '%Carmen roll-call phone%'`)).map(x=>x.msg);
+ok(PH.length===1 && /battery LOW 19%/.test(PH[0]),'phone 19%: one LOW alert');
+await beat({device_id:'app-ph1',battery:9,charging:false,page_url:RC}); await q(`select public.kiosk_app_tick()`);
+PH=(await q(`select msg from sent where msg like '%Carmen roll-call phone%'`)).map(x=>x.msg);
+ok(PH.length===2 && /CRITICAL 9%/.test(PH[1]),'phone 9%: one CRITICAL alert');
+await q(`update kiosk_app_devices set last_seen=now()-interval '5 hours' where device_id='app-ph1'`);
+await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone%OFFLINE%'`))[0].n===0,'phone silent for hours (in the yard): no OFFLINE alert');
+await beat({device_id:'app-ph1',battery:15,charging:true,page_url:RC}); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select batt_step from kiosk_app_devices where device_id='app-ph1'`))[0].batt_step===100 &&
+   (await q(`select count(*)::int n from sent where msg like '%Carmen roll-call phone%' and (msg like '%ONLINE%' or msg like '%charging again%')`))[0].n===0,
+   'phone charging: steps reset quietly, no back-ONLINE / charging-again message');
+const PST=(await q(`select public.kiosk_app_status() r`))[0].r;
+ok(!PST.some(x=>x.name==="Carmen roll-call phone") && PST.length>0,'dashboard charging banner leaves the phone out, tablets stay');
+await q(`delete from sent`);
+
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}

@@ -22,6 +22,8 @@ final class Prefs {
     }
 
     String url() { return sp.getString("url", Config.DEFAULT_URL); }
+    /** Roll-call phone (page address is a Job Monitoring page): see Mode. */
+    boolean phone() { return Mode.isPhoneUrl(url()); }
     void setUrl(String u) { sp.edit().putString("url", u).apply(); }
 
     String name() { return sp.getString("name", ""); }
@@ -29,7 +31,8 @@ final class Prefs {
 
     String onTime() { return sp.getString("on", Config.DEFAULT_ON); }
     String offTime() { return sp.getString("off", Config.DEFAULT_OFF); }
-    boolean scheduleEnabled() { return sp.getBoolean("sched", true); }
+    /** A roll-call phone never has a screen schedule: Android's own 1-min timeout turns its screen off. */
+    boolean scheduleEnabled() { return !phone() && sp.getBoolean("sched", true); }
     void setSchedule(String on, String off, boolean enabled) {
         sp.edit().putString("on", on).putString("off", off).putBoolean("sched", enabled).apply();
     }

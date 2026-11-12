@@ -553,6 +553,19 @@ end $$;
 revoke all on function public.kiosk_app_set_power(text, text, text) from public;
 grant execute on function public.kiosk_app_set_power(text, text, text) to anon, authenticated;
 
+-- STEP 6c2 - roll-call PHONE (owner 2026-11-08 / 11-12): the Wi-Fi-only Motorola runs this app locked to a
+-- Job Monitoring page. It is carried around on battery and offline in the yard by design, so it gets NO
+-- OFFLINE / back ONLINE / NOT CHARGING / charging-again / generator alerts and is left off the dashboard
+-- charging banner. Battery: only LOW 20% and CRITICAL 10% (sent when it reports, i.e. on Wi-Fi).
+-- HOT and weak-charger alerts stay. "Not synced by 7:30 PM" / "not seen 2 days" come from the roll-call
+-- page itself (rsr-engineering monitoring/sql/rollcall-offline-sync.sql). Same rule as the app (Mode.java).
+create or replace function public.kiosk_app_is_phone(p_url text)
+returns boolean language sql immutable as $$
+  select coalesce(lower(split_part(split_part(btrim(p_url), '?', 1), '#', 1))
+                  like 'https://seafordprojects-bit.github.io/%/monitoring/%', false)
+$$;
+revoke all on function public.kiosk_app_is_phone(text) from public, anon, authenticated;
+
 -- STEP 6d - RSR Admin dashboard: battery/charging banner. Read-only, no passcode (same as kiosk_health,
 -- which the dashboard already reads with the public key): names, battery %, charging, and whether the
 -- generator should be on (Carmen) so a break or the night is not shown as a problem.
@@ -575,7 +588,8 @@ returns jsonb language sql stable security definer set search_path = public as $
                                else false end) as j
       from public.kiosk_app_devices k
       cross join lateral (select public.kiosk_app_power_state(k.power_windows,
-            (extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila')))::int) as state) st) x
+            (extract(hour from (now() at time zone 'Asia/Manila'))*60 + extract(minute from (now() at time zone 'Asia/Manila')))::int) as state) st
+     where not public.kiosk_app_is_phone(k.page_url)) x
 $$;
 revoke all on function public.kiosk_app_status() from public;
 grant execute on function public.kiosk_app_status() to anon, authenticated;
@@ -600,11 +614,43 @@ declare
   v_next  timestamptz;
   v_need  int;
   v_state text;
+  v_phone boolean;
 begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
 
   for r in select * from public.kiosk_app_devices loop
     v_name := coalesce(nullif(r.name,''), r.device_id);
+    v_phone := public.kiosk_app_is_phone(r.page_url);
+
+    -- ROLL-CALL PHONE (see STEP 6c2): offline in the yard and on battery by design.
+    if v_phone then
+      if r.last_seen > now() - interval '10 minutes' then
+        if r.battery_temp is not null and r.battery_temp >= 45 and not r.hot_alerted then
+          perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is HOT - battery ' || r.battery_temp
+                  || ' C. Move it out of the sun / give it air. Heat damages the battery.');
+          update public.kiosk_app_devices set hot_alerted = true where device_id = r.device_id;
+        elsif r.hot_alerted and coalesce(r.battery_temp, 0) < 40 then
+          update public.kiosk_app_devices set hot_alerted = false where device_id = r.device_id;
+        end if;
+        if r.charging is false and r.battery is not null then
+          if r.battery <= 10 and r.batt_step > 10 then
+            perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery CRITICAL ' || r.battery
+                    || '% - charge it at the office NOW or roll-call stops.');
+            update public.kiosk_app_devices set batt_step = 10, low_batt_alerted = true where device_id = r.device_id;
+          elsif r.battery <= 20 and r.batt_step > 20 then
+            perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' battery LOW ' || r.battery
+                    || '%. Charge it at the office today.');
+            update public.kiosk_app_devices set batt_step = 20, low_batt_alerted = true where device_id = r.device_id;
+          end if;
+        elsif r.charging is true and (r.batt_step < 100 or r.low_batt_alerted) then
+          update public.kiosk_app_devices set batt_step = 100, low_batt_alerted = false where device_id = r.device_id;
+        end if;
+      end if;
+      -- a tablet re-pointed to roll-call must not keep an old OFFLINE / NOT CHARGING state
+      update public.kiosk_app_devices set offline_first_at = null, unplugged_alerted = false, unplugged_alerted_at = null
+       where device_id = r.device_id and (offline_first_at is not null or unplugged_alerted);
+      continue;
+    end if;
 
     -- OFFLINE: no report for 10 min. Only 6 AM - 10 PM, only while the tablet's own screen schedule
     -- has it awake (plus 15 min after its ON time), and only for a tablet seen in the last 24 h

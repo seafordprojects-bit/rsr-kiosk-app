@@ -196,7 +196,9 @@ function render(rows) {
   const L = document.getElementById('list');
   if (!rows.length) { L.innerHTML = '<div class="card">No tablet is running the RSR Kiosk app yet.</div>'; return; }
   L.innerHTML = rows.map(t => {
-    const color = t.online ? 'var(--ok)' : t.asleep ? 'var(--mute)' : 'var(--bad)';
+    // Roll-call phone (2026-11-12): same rule as Mode.java / kiosk_app_is_phone. Offline in the yard is normal.
+    const phone = /^https:\/\/seafordprojects-bit\.github\.io\/[^?#]*\/monitoring\//i.test(t.page_url || '');
+    const color = t.online ? 'var(--ok)' : (t.asleep || phone) ? 'var(--mute)' : 'var(--bad)';
     const batt = t.battery == null ? '-' : t.battery + '%' + (t.charging ? ' (charging)' : ' (NOT charging)');
     const battColor = (t.battery != null && t.battery <= 20 && !t.charging) || t.charging === false ? 'var(--warn)' : 'inherit';
     const last = t.cmd ? esc(t.cmd) + ': ' + (t.pending ? 'waiting for tablet...' : esc(t.cmd_result || '-')) + ' <span class="mute">' + hhmm(t.cmd_at) + '</span>' : '-';
@@ -204,8 +206,8 @@ function render(rows) {
     const ev = (t.events || []).map(e => '<li>' + esc(e.event) + ' - ' + hhmm(e.at) + '</li>').join('');
     const id = esc(t.device_id);
     return `<div class="card">
-      <div class="row"><span class="dot" style="background:${color}"></span><span class="name">${esc(t.name || t.device_id)}</span>
-        <span class="mute">${t.online ? 'Online' : t.asleep ? 'Asleep (screen schedule)' : 'OFFLINE'} - ${ago(t.last_seen)}</span></div>
+      <div class="row"><span class="dot" style="background:${color}"></span><span class="name">${esc(t.name || t.device_id)}${phone ? ' <span class="mute">&#128241; roll-call phone</span>' : ''}</span>
+        <span class="mute">${t.online ? 'Online' : phone ? 'Not on Wi-Fi (normal in the yard)' : t.asleep ? 'Asleep (screen schedule)' : 'OFFLINE'} - ${ago(t.last_seen)}</span></div>
       <div class="grid">
         <div class="stat"><b>Battery</b><span style="color:${battColor}">${batt}</span></div>
         <div class="stat"><b>Screen</b>${t.screen_on ? 'On' : 'Off'}</div>

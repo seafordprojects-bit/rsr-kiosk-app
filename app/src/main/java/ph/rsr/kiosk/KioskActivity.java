@@ -427,7 +427,11 @@ public class KioskActivity extends Activity implements Core.Host {
         Core core = Core.get(this);
         core.setHost(this);
         KeepAlive.start(this);   // in front = always allowed; restarts it if Android ever stopped it
-        applyScreenFlag(true);   // the app decides when the screen goes off (Core.checkScheduleTransition)
+        // Tablet: the app decides when the screen goes off (Core.checkScheduleTransition).
+        // Roll-call phone: carried on battery, so Android's own 1-min timeout turns the screen off (Mode).
+        boolean phone = prefs.phone();
+        applyScreenFlag(!phone);
+        if (phone) Policy.applyPhoneScreenTimeout(this);
         hideBars();
         if (!prefs.inMaintenance()) startLock();
         if (web != null) web.onResume();

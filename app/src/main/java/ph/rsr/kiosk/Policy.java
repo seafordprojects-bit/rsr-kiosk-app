@@ -58,6 +58,14 @@ final class Policy {
         run("updates", () -> d.setSystemUpdatePolicy(a, SystemUpdatePolicy.createWindowedInstallPolicy(30, 4 * 60 + 30)));
     }
 
+    /** Roll-call phone (Mode): screen off after 1 min without a touch, so the battery lasts the day in the
+     *  yard. Only with device owner (Android 9+); otherwise the phone keeps its own timeout. Safe to repeat. */
+    static void applyPhoneScreenTimeout(Context c) {
+        if (!isOwner(c) || android.os.Build.VERSION.SDK_INT < 28) return;
+        run("phone screen timeout", () -> dpm(c).setSystemSetting(admin(c),
+                android.provider.Settings.System.SCREEN_OFF_TIMEOUT, String.valueOf(Mode.PHONE_SCREEN_TIMEOUT_MS)));
+    }
+
     /** Maintenance: let the office use the tablet normally for a while (Wi-Fi, Settings). */
     static void relaxForMaintenance(Context c) {
         if (!isOwner(c)) return;
