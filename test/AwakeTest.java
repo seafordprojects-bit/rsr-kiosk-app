@@ -118,7 +118,7 @@ public class AwakeTest {
         String act = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java"));
         String wb = body(act, "public void wakeAndBrighten()");
         ok(wb.contains("setBacklightLow(false)"), "it turns the dimmed backlight (1%) back up");
-        ok(wb.contains("lastTouchAt"), "it restarts the 6-minute dim timer (otherwise it dims again within 30 s)");
+        ok(wb.contains("lastTouchAt"), "it restarts the 5-minute black timer (otherwise it dims again within 30 s)");
         ok(wb.contains("wakeScreen()") && wb.contains("typeof wakeScreen"), "it lifts the page's own black screen (kiosk/index.html wakeScreen), guarded if missing");
         String js = wb.substring(Math.max(0, wb.indexOf("evaluateJavascript")));   // the script, not the comments
         ok(js.indexOf("screenBlack") >= 0 && js.indexOf("screenBlack") < js.indexOf("wakeScreen()"),
@@ -191,6 +191,10 @@ public class AwakeTest {
         ok(rw.contains("wakeScreen();") && rw.contains("nudgePage"), "Core.reportWake is unchanged: wakes (brings the kiosk to front) and pushes the punches");
         String ps = body(Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java")), "public void onPageStarted(");
         ok(!ps.contains("setBacklightLow(false)"), "a page reload (version check, hang reload) does NOT lift the backlight of an idle tablet");
+        String pf = body(Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java")), "public void onPageFinished(");
+        ok(!pf.contains("setBacklightLow(false)") && pf.contains("if (backlightLow) v.evaluateJavascript(") && pf.contains("goBlack()")
+                && pf.contains("!screenBlack") && pf.contains("curEmp") && pf.contains(".modal-bg.show"),
+                "a page that reloads on a dark tablet goes straight back to black (never mid-punch), so it does not glow for 5 min");
         String act2 = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java"));
         ok(act2.contains("Awake.BACKLIGHT_LOW_AFTER_MS") && !act2.contains("6 * 60_000L + 15_000L"), "KioskActivity uses Awake.BACKLIGHT_LOW_AFTER_MS (no old 6-minute copy)");
 

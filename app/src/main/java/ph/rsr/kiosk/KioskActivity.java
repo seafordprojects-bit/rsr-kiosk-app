@@ -139,9 +139,10 @@ public class KioskActivity extends Activity implements Core.Host {
                 mainFrameError = false;
                 loading = true;
                 hangAskedAt = 0;
-                // (2026-11-12) a reload no longer lifts the backlight: the page checks for a new version every minute and
-                // reloads by itself (plus hang reloads), and each one lit an idle tablet for up to 30 s ("the kiosk keeps
-                // on waking", owner). Only a touch, the office's Screen on / Screenshot, or the ON time lift it.
+                // (2026-11-12) a reload no longer lifts the backlight: the page reloads by itself after every deploy
+                // (plus hang and crash reloads), and each one lit an idle tablet for up to 30 s ("the kiosk keeps on
+                // waking", owner). Only a touch or the office's Screen on / Screenshot lift it; onPageFinished puts a
+                // page that reloaded under the low backlight straight back to black.
                 // A navigation drops a pending hang check; never blame the new page for it.
                 if (url != null) lastUrl = url;
             }
@@ -155,6 +156,12 @@ public class KioskActivity extends Activity implements Core.Host {
                     overlay.setVisibility(View.GONE);
                     readPageDeviceId();
                     readPageVersion();
+                    // Low backlight = the tablet was idle and dark: a reloaded page starts awake (clock + keypad) and
+                    // would glow faintly for 5 min and take the first tap on the keypad. Put it back to its own black
+                    // screen, never while a worker is mid-punch. Guarded so an older page is not an error.
+                    if (backlightLow) v.evaluateJavascript("(function(){try{if(typeof screenBlack!=='undefined'&&!screenBlack"
+                            + "&&typeof goBlack==='function'&&!(typeof curEmp!=='undefined'&&curEmp)"
+                            + "&&!(typeof pin!=='undefined'&&pin)&&!document.querySelector('.modal-bg.show'))goBlack();}catch(e){}})()", null);
                 }
             }
 
