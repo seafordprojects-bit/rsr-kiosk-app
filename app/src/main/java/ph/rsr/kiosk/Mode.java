@@ -24,15 +24,18 @@ final class Mode {
     /** Never let these out of the lock, even if one handles a camera/gallery intent. */
     private static final java.util.Set<String> NEVER = new java.util.HashSet<>(java.util.Arrays.asList(
             "com.android.settings", "com.android.vending", "com.android.chrome", "com.google.android.googlequicksearchbox",
-            "com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.systemui"));
+            "com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.systemui",
+            "com.google.android.apps.photos", "com.google.android.apps.nbu.files", "com.google.android.apps.docs",
+            "com.google.android.documentsui", "com.android.documentsui"));
 
     /** Apps allowed in the lock. Tablet: only RSR. Roll-call phone (owner 2026-11-14, job before/after photos):
-     *  RSR + the phone's own Camera, Gallery and photo picker (found on the phone by MediaApps). */
+     *  RSR + the phone's own built-in camera app (MediaApps). At most 2 apps; anything on NEVER is dropped. */
     static String[] lockPackages(String self, boolean phone, java.util.Collection<String> media) {
         java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
         out.add(self);
         if (phone && media != null) for (String p : media) {
-            if (p != null && !p.trim().isEmpty() && !NEVER.contains(p.trim())) out.add(p.trim());
+            if (out.size() >= 2) break;
+            if (p != null && !p.trim().isEmpty() && !NEVER.contains(p.trim()) && !"android".equals(p.trim())) out.add(p.trim());
         }
         return out.toArray(new String[0]);
     }

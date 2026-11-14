@@ -108,6 +108,7 @@ public class KioskActivity extends Activity implements Core.Host {
             root.removeView(web);
             try { web.destroy(); } catch (Exception ignored) { }
         }
+        fileCb = null;   // a photo-picker answer for the old page is dropped, never delivered to a dead WebView
         web = new WebView(this);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -195,6 +196,7 @@ public class KioskActivity extends Activity implements Core.Host {
                 root.removeView(v);
                 try { v.destroy(); } catch (Exception ignored) { }
                 web = null;
+                fileCb = null;   // the picker's answer would go to the dead page
                 Core.get(KioskActivity.this).reportEvent("page crashed, rebuilt");
                 // At most one rebuild every 10 s, so repeated out-of-memory kills cannot loop fast.
                 long wait = Math.max(0, 10_000 - (SystemClock.elapsedRealtime() - lastRebuild));
@@ -292,11 +294,11 @@ public class KioskActivity extends Activity implements Core.Host {
     private final class PhoneBridge {
         @android.webkit.JavascriptInterface public boolean ready() { return prefs.phone(); }
         @android.webkit.JavascriptInterface public void openCamera() { runOnUiThread(() -> openMedia(MediaApps.camera())); }
-        @android.webkit.JavascriptInterface public void openGallery() { runOnUiThread(() -> openMedia(MediaApps.gallery())); }
     }
 
     private void openMedia(Intent i) {
-        if (!prefs.phone()) return;
+        // phone only, and only while an RSR Job Monitoring page is showing (not from some other frame)
+        if (!prefs.phone() || web == null || !Mode.isPhoneUrl(web.getUrl())) return;
         try { startActivity(i); } catch (Exception e) { Log.w(TAG, "media", e); }
     }
 
@@ -688,7 +690,12 @@ public class KioskActivity extends Activity implements Core.Host {
 
     /** Settings asks for a fresh page after the address changed. */
     void loadConfiguredUrl() {
-        if (web != null) web.loadUrl(prefs.url());
+        // address changed in Settings (tablet <-> roll-call phone): refresh the lock list and the phone-only setting
+        if (!prefs.inMaintenance()) Policy.applyKioskPolicies(this);
+        if (web != null) {
+            web.getSettings().setAllowContentAccess(prefs.phone());
+            web.loadUrl(prefs.url());
+        }
     }
 
     @Override

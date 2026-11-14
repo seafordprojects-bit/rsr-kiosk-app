@@ -22,14 +22,9 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
 
-    <!-- Roll-call phone job photos (MediaApps): see the phone's own camera, gallery and photo picker -->
+    <!-- Roll-call phone job photos (MediaApps): see the phone's own camera app -->
     <queries>
         <intent><action android:name="android.media.action.STILL_IMAGE_CAMERA" /></intent>
-        <intent><action android:name="android.media.action.IMAGE_CAPTURE" /></intent>
-        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.APP_GALLERY" /></intent>
-        <intent><action android:name="android.intent.action.VIEW" /><data android:mimeType="image/*" /></intent>
-        <intent><action android:name="android.provider.action.PICK_IMAGES" /></intent>
-        <intent><action android:name="android.intent.action.GET_CONTENT" /><data android:mimeType="image/*" /></intent>
     </queries>
 
     <application

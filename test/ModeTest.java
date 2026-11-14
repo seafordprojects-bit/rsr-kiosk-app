@@ -37,13 +37,16 @@ public class ModeTest {
         ok(!Mode.phoneBlocks(rc, null), "no target = not blocked here (host check handles it)");
         // Job photos (owner 2026-11-14): the roll-call phone may also open the phone's own Camera and Gallery
         // (and the photo picker) so the in-charge takes and checks photos, then uploads them in roll-call.
-        java.util.List<String> media = java.util.Arrays.asList("com.motorola.camera5", "com.google.android.apps.photos",
-                "com.google.android.providers.media.module", "com.android.settings", "com.android.vending",
-                "com.android.chrome", null, "", "com.motorola.camera5");
+        java.util.List<String> media = java.util.Arrays.asList("com.motorola.camera5", "com.google.android.apps.photos");
         String[] ph = Mode.lockPackages("ph.rsr.kiosk", true, media);
-        ok(java.util.Arrays.asList(ph).equals(java.util.Arrays.asList("ph.rsr.kiosk", "com.motorola.camera5",
-                "com.google.android.apps.photos", "com.google.android.providers.media.module")),
-                "phone: RSR app + camera + gallery + picker; never Settings, Play Store or a browser; no repeats");
+        ok(java.util.Arrays.asList(ph).equals(java.util.Arrays.asList("ph.rsr.kiosk", "com.motorola.camera5")),
+                "phone: RSR app + its camera app only (review: no Google Photos - Share/Lens/sign-in escape the lock)");
+        for (String bad : new String[]{"com.google.android.apps.photos", "com.google.android.apps.nbu.files", "com.google.android.apps.docs",
+                "com.google.android.documentsui", "com.android.settings", "com.android.vending", "com.android.chrome", "android", "", null}) {
+            ok(Mode.lockPackages("ph.rsr.kiosk", true, java.util.Collections.singletonList(bad)).length == 1, "phone never lets in: " + bad);
+        }
+        ok(Mode.lockPackages("ph.rsr.kiosk", true, java.util.Arrays.asList("a.cam", "b.other", "c.more")).length == 2,
+                "phone: never more than RSR + one camera app");
         String[] tab = Mode.lockPackages("ph.rsr.kiosk", false, media);
         ok(tab.length == 1 && tab[0].equals("ph.rsr.kiosk"), "tablet: still only the RSR app");
         ok(Mode.lockPackages("ph.rsr.kiosk", true, null).length == 1, "phone with no camera/gallery found: only the RSR app");
