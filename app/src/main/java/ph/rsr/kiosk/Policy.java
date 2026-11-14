@@ -42,9 +42,15 @@ final class Policy {
         if (!isOwner(c)) return;
         DevicePolicyManager d = dpm(c);
         ComponentName a = admin(c);
-        run("lockTaskPackages", () -> d.setLockTaskPackages(a, new String[]{c.getPackageName()}));
-        // NONE = no Home, no Recents, no notifications, no power menu while locked.
-        run("lockTaskFeatures", () -> d.setLockTaskFeatures(a, DevicePolicyManager.LOCK_TASK_FEATURE_NONE));
+        // Tablet: only RSR. Roll-call phone (owner 2026-11-14): also its own Camera, Gallery and photo picker,
+        // for job before/after photos (Mode.lockPackages; never Settings, Play Store or a browser).
+        final boolean phone = new Prefs(c).phone();
+        run("lockTaskPackages", () -> d.setLockTaskPackages(a,
+                Mode.lockPackages(c.getPackageName(), phone, phone ? MediaApps.find(c) : null)));
+        // NONE = no Home, no Recents, no notifications, no power menu while locked. Phone: Home button only,
+        // and Home is the RSR app, so the in-charge always gets back from the Camera or Gallery.
+        run("lockTaskFeatures", () -> d.setLockTaskFeatures(a, Mode.phoneHomeButton(phone)
+                ? DevicePolicyManager.LOCK_TASK_FEATURE_HOME : DevicePolicyManager.LOCK_TASK_FEATURE_NONE));
         run("home", () -> setAsHome(c, d, a));
         run("keyguard", () -> d.setKeyguardDisabled(a, true));
         run("statusbar", () -> d.setStatusBarDisabled(a, true));

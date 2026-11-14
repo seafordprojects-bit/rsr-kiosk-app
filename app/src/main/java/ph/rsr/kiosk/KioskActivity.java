@@ -26,6 +26,7 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -115,7 +116,8 @@ public class KioskActivity extends Activity implements Core.Host {
         s.setMediaPlaybackRequiresUserGesture(false);   // camera preview + beeps start without a tap
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
         s.setAllowFileAccess(false);
-        s.setAllowContentAccess(false);
+        // Roll-call phone: photos picked from the gallery come as content:// addresses; tablets never read any.
+        s.setAllowContentAccess(prefs.phone());
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setTextZoom(100);
@@ -207,7 +209,27 @@ public class KioskActivity extends Activity implements Core.Host {
             }
         });
 
+        // Roll-call phone only (owner 2026-11-14, job photos): page buttons open the phone's Camera / Gallery.
+        web.addJavascriptInterface(new PhoneBridge(), "RSRPhone");
+
         web.setWebChromeClient(new WebChromeClient() {
+            /** Roll-call phone: <input type=file accept=image/*> opens the photo picker (photos from the gallery).
+             *  Tablets: never (no file picking on a kiosk). */
+            @Override
+            public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                if (!prefs.phone() || !imagesOnly(p)) return false;
+                if (fileCb != null) fileCb.onReceiveValue(null);
+                fileCb = cb;
+                try {
+                    startActivityForResult(MediaApps.picker(p.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE), REQ_PICK);
+                    return true;
+                } catch (Exception e) {
+                    Log.w(TAG, "picker", e);
+                    fileCb = null;
+                    return false;
+                }
+            }
+
             /** The page's errors only (uncaught errors, failed loads, console.error): the latest one is
              *  sent with the heartbeat so the office sees "what went wrong, when" without visiting the yard. */
             @Override
@@ -238,6 +260,44 @@ public class KioskActivity extends Activity implements Core.Host {
         });
 
         root.addView(web, 0, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    private static final int REQ_PICK = 42;
+    private ValueCallback<Uri[]> fileCb;
+
+    private static boolean imagesOnly(WebChromeClient.FileChooserParams p) {
+        String[] t = p == null ? null : p.getAcceptTypes();
+        if (t == null || t.length == 0) return false;
+        for (String s : t) if (s == null || !s.trim().toLowerCase(java.util.Locale.ROOT).startsWith("image/")) return false;
+        return true;
+    }
+
+    @Override
+    protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code != REQ_PICK) return;
+        ValueCallback<Uri[]> cb = fileCb;
+        fileCb = null;
+        if (cb == null) return;
+        java.util.ArrayList<Uri> out = new java.util.ArrayList<>();
+        if (result == RESULT_OK && data != null) {
+            android.content.ClipData clip = data.getClipData();
+            if (clip != null) for (int i = 0; i < clip.getItemCount(); i++) { Uri u = clip.getItemAt(i).getUri(); if (u != null) out.add(u); }
+            else if (data.getData() != null) out.add(data.getData());
+        }
+        cb.onReceiveValue(out.isEmpty() ? null : out.toArray(new Uri[0]));
+    }
+
+    /** window.RSRPhone on the page. Does nothing on a kiosk tablet. */
+    private final class PhoneBridge {
+        @android.webkit.JavascriptInterface public boolean ready() { return prefs.phone(); }
+        @android.webkit.JavascriptInterface public void openCamera() { runOnUiThread(() -> openMedia(MediaApps.camera())); }
+        @android.webkit.JavascriptInterface public void openGallery() { runOnUiThread(() -> openMedia(MediaApps.gallery())); }
+    }
+
+    private void openMedia(Intent i) {
+        if (!prefs.phone()) return;
+        try { startActivity(i); } catch (Exception e) { Log.w(TAG, "media", e); }
     }
 
     /** Camera (and mic) only. */

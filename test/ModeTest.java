@@ -35,6 +35,19 @@ public class ModeTest {
         ok(!Mode.phoneBlocks(rc, base + "/monitoring/borrow.html?site=Carmen"), "phone: tool borrow allowed");
         ok(!Mode.phoneBlocks(base + "/kiosk/", base + "/index.html"), "tablet: nothing extra is blocked");
         ok(!Mode.phoneBlocks(rc, null), "no target = not blocked here (host check handles it)");
+        // Job photos (owner 2026-11-14): the roll-call phone may also open the phone's own Camera and Gallery
+        // (and the photo picker) so the in-charge takes and checks photos, then uploads them in roll-call.
+        java.util.List<String> media = java.util.Arrays.asList("com.motorola.camera5", "com.google.android.apps.photos",
+                "com.google.android.providers.media.module", "com.android.settings", "com.android.vending",
+                "com.android.chrome", null, "", "com.motorola.camera5");
+        String[] ph = Mode.lockPackages("ph.rsr.kiosk", true, media);
+        ok(java.util.Arrays.asList(ph).equals(java.util.Arrays.asList("ph.rsr.kiosk", "com.motorola.camera5",
+                "com.google.android.apps.photos", "com.google.android.providers.media.module")),
+                "phone: RSR app + camera + gallery + picker; never Settings, Play Store or a browser; no repeats");
+        String[] tab = Mode.lockPackages("ph.rsr.kiosk", false, media);
+        ok(tab.length == 1 && tab[0].equals("ph.rsr.kiosk"), "tablet: still only the RSR app");
+        ok(Mode.lockPackages("ph.rsr.kiosk", true, null).length == 1, "phone with no camera/gallery found: only the RSR app");
+        ok(Mode.phoneHomeButton(true) && !Mode.phoneHomeButton(false), "Home button only on the phone (it brings back RSR)");
         ok(Mode.PHONE_SCREEN_TIMEOUT_MS == 60_000, "phone screen turns off after 1 min without a touch");
         System.out.println(passes + " passed, " + fails + " failed");
         if (fails > 0) System.exit(1);

@@ -21,6 +21,26 @@ final class Mode {
         return target != null && isPhoneUrl(savedUrl) && !isPhoneUrl(target);
     }
 
+    /** Never let these out of the lock, even if one handles a camera/gallery intent. */
+    private static final java.util.Set<String> NEVER = new java.util.HashSet<>(java.util.Arrays.asList(
+            "com.android.settings", "com.android.vending", "com.android.chrome", "com.google.android.googlequicksearchbox",
+            "com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.systemui"));
+
+    /** Apps allowed in the lock. Tablet: only RSR. Roll-call phone (owner 2026-11-14, job before/after photos):
+     *  RSR + the phone's own Camera, Gallery and photo picker (found on the phone by MediaApps). */
+    static String[] lockPackages(String self, boolean phone, java.util.Collection<String> media) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        out.add(self);
+        if (phone && media != null) for (String p : media) {
+            if (p != null && !p.trim().isEmpty() && !NEVER.contains(p.trim())) out.add(p.trim());
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** Roll-call phone: the Home button works and always brings back the RSR app (it is the phone's Home),
+     *  so the in-charge can never get stuck in the Camera or Gallery. Tablets: no Home button. */
+    static boolean phoneHomeButton(boolean phone) { return phone; }
+
     /** True for an RSR Job Monitoring page (path contains /monitoring/). Query and #hash are ignored. */
     static boolean isPhoneUrl(String url) {
         if (url == null) return false;
