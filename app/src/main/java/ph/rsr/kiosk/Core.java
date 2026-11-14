@@ -78,6 +78,11 @@ final class Core {
         return false;
     }
 
+    /** Punch-rush protection blocks office commands only on a kiosk tablet (build-14, owner 2026-11-14).
+     *  A roll-call phone has no kiosk punches, so Update / Reload / Full reload / Restart are never
+     *  refused on it for "punch rush time". Tablets are unchanged. Pure decision in Mode (tested). */
+    private boolean rushBlocks() { return Mode.rushBlocks(inRush(), prefs.phone()); }
+
     static int nowMin() {
         Calendar c = Calendar.getInstance();
         return c.get(Calendar.HOUR_OF_DAY) * 60 + c.get(Calendar.MINUTE);
@@ -328,7 +333,7 @@ final class Core {
                 // A page that is not loading cannot be punched on anyway: reload at once.
                 Host h0 = host.get();
                 boolean broken = h0 != null && !h0.pageOk();
-                if (!broken && inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (!broken && rushBlocks()) { ack(id, "refused: punch rush time - send again later"); break; }
                 if (!broken && !waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
                 final boolean hard = cmd.equals("hard_reload");
                 main.post(() -> { Host h = host.get(); if (h != null) h.reloadPage(hard); });
@@ -337,15 +342,15 @@ final class Core {
             }
             case "restart":
                 if (!Policy.isOwner(ctx)) { ack(id, "failed: not device owner"); break; }
-                if (inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (rushBlocks()) { ack(id, "refused: punch rush time - send again later"); break; }
                 if (!waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
                 ack(id, "restarting");
                 Policy.reboot(ctx);
                 break;
             case "update":
-                if (inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (rushBlocks()) { ack(id, "refused: punch rush time - send again later"); break; }
                 if (!waitUntilSafe(60, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
-                ack(id, Updater.checkAndInstall(ctx, () -> !inRush() && safeNow(30)));
+                ack(id, Updater.checkAndInstall(ctx, () -> !rushBlocks() && safeNow(30)));
                 break;
             case "screen_on":
                 touched();   // at once: the night / evening idle screen-off counts from this press

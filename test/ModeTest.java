@@ -52,6 +52,13 @@ public class ModeTest {
         ok(Mode.lockPackages("ph.rsr.kiosk", true, null).length == 1, "phone with no camera/gallery found: only the RSR app");
         ok(Mode.phoneHomeButton(true) && !Mode.phoneHomeButton(false), "Home button only on the phone (it brings back RSR)");
         ok(Mode.PHONE_SCREEN_TIMEOUT_MS == 60_000, "phone screen turns off after 1 min without a touch");
+
+        // build-14: punch-rush protection is for kiosk tablets only; the roll-call phone has no punches.
+        ok(Mode.rushBlocks(true,  false), "TABLET during rush: office command refused (protected)");
+        ok(!Mode.rushBlocks(false, false), "TABLET outside rush: command allowed");
+        ok(!Mode.rushBlocks(true,  true),  "PHONE during rush: command NOT refused (no punches)");
+        ok(!Mode.rushBlocks(false, true),  "PHONE outside rush: command allowed");
+
         System.out.println(passes + " passed, " + fails + " failed");
         if (fails > 0) System.exit(1);
     }

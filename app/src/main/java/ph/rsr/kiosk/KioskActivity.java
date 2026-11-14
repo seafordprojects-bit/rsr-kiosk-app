@@ -366,10 +366,20 @@ public class KioskActivity extends Activity implements Core.Host {
         getWindow().setAttributes(lp);
     }
 
-    /** The kiosk page's own version stamp (kiosk/index.html #version-stamp, e.g. v2026-10-16d). */
+    /** The page's version stamp (build-14). Reads whichever the open page uses:
+     *   - kiosk/index.html: the #version-stamp element (e.g. v2026-10-16d),
+     *   - roll-call.html / borrow.html: the "... &middot; vYYYY-MM-DD" text in the .sub header,
+     *   - monitoring/index.html (Job Monitoring menu): the "<!-- build vYYYY-MM-DD -->" comment.
+     *  The Tablets page shows it as "Roll-call page version" on a phone card. */
     private void readPageVersion() {
         if (web == null) return;
-        web.evaluateJavascript("(function(){try{var e=document.getElementById('version-stamp');return e?e.textContent.trim():''}catch(x){return ''}})()", v -> {
+        web.evaluateJavascript(
+            "(function(){try{var re=/v\\d{4}-\\d{2}-\\d{2}[a-z]?/;"
+          + "var e=document.getElementById('version-stamp');if(e){var m=re.exec(e.textContent);if(m)return m[0];}"
+          + "var s=document.querySelectorAll('.sub');for(var i=0;i<s.length;i++){var m2=re.exec(s[i].textContent);if(m2)return m2[0];}"
+          + "var w=document.createTreeWalker(document,NodeFilter.SHOW_COMMENT,null,false),c;"
+          + "while((c=w.nextNode())){var m3=/build\\s+(v\\d{4}-\\d{2}-\\d{2}[a-z]?)/.exec(c.nodeValue);if(m3)return m3[1];}"
+          + "return ''}catch(x){return ''}})()", v -> {
             if (v == null) return;
             String s = v.replace("\"", "").trim();
             if (s.matches("v[0-9]{4}-[0-9]{2}-[0-9]{2}[a-z]?")) pageVersion = s;

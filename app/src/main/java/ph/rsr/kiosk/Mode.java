@@ -15,6 +15,11 @@ final class Mode {
 
     static final long PHONE_SCREEN_TIMEOUT_MS = 60_000L;
 
+    /** Punch-rush protection (Config.RUSH) blocks office commands only on a kiosk tablet
+     *  (build-14, owner 2026-11-14). A roll-call phone has no kiosk punches, so Update / Reload /
+     *  Full reload / Restart are never refused on it for "punch rush time". Tablets are unchanged. */
+    static boolean rushBlocks(boolean inRush, boolean phone) { return inRush && !phone; }
+
     /** Roll-call phone (owner 2026-11-12): only Job Monitoring pages may open; any other RSR page (main menu,
      *  coordinator, issuance) is refused and the phone goes back to its saved page. Tablets: never. */
     static boolean phoneBlocks(String savedUrl, String target) {
