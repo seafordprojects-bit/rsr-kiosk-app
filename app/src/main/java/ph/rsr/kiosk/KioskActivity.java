@@ -75,6 +75,8 @@ public class KioskActivity extends Activity implements Core.Host {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = new Prefs(this);
+        // Android may close the app while the camera is open: remember the gallery entry so it is cleaned up
+        if (b != null && b.getString("rsr_capture_uri") != null) captureUri = Uri.parse(b.getString("rsr_capture_uri"));
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED | WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
 
         root = new FrameLayout(this);
@@ -221,6 +223,7 @@ public class KioskActivity extends Activity implements Core.Host {
             public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
                 if (!prefs.phone() || !imagesOnly(p)) return false;
                 if (fileCb != null) fileCb.onReceiveValue(null);
+                dropPendingCapture();
                 fileCb = cb;
                 // "Take photo" (input capture=...): the camera opens and the photo is saved to the gallery AND sent back
                 if (p.isCaptureEnabled() && startCapture()) return true;
@@ -296,6 +299,18 @@ public class KioskActivity extends Activity implements Core.Host {
             captureUri = null;
             return false;
         }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        if (captureUri != null) out.putString("rsr_capture_uri", captureUri.toString());
+    }
+
+    /** A Take photo still waiting (e.g. the app came back on top of the camera): drop its empty gallery entry. */
+    private void dropPendingCapture() {
+        Uri u = captureUri; captureUri = null;
+        if (u != null && !hasPhoto(u)) try { getContentResolver().delete(u, null, null); } catch (Exception ignored) { }
     }
 
     /** True if the camera really wrote a photo into u (some cameras answer OK with nothing saved). */
