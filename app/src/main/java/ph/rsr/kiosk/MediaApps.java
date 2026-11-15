@@ -42,6 +42,20 @@ final class MediaApps {
     /** The phone's camera app, opened normally: photos are saved on the phone. */
     static Intent camera() { return new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA); }
 
+    /** Take ONE photo for a job order: the phone's own camera app (same package as camera()), writing into `out`
+     *  (a new gallery entry). Null if this phone's camera cannot do it (then roll-call uses the photo picker). */
+    static Intent capture(Context c, android.net.Uri out) {
+        List<String> cam = find(c);
+        if (cam.isEmpty()) return null;
+        Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE).setPackage(cam.get(0))
+                .putExtra(MediaStore.EXTRA_OUTPUT, out)
+                .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            if (c.getPackageManager().resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY) == null) return null;
+        } catch (Exception e) { return null; }
+        return i;
+    }
+
     /** Check / choose photos for roll-call (<input type=file>). Android 13+: the system photo picker. */
     static Intent picker(boolean multiple) {
         if (android.os.Build.VERSION.SDK_INT >= 33) {

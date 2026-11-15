@@ -222,6 +222,8 @@ public class KioskActivity extends Activity implements Core.Host {
                 if (!prefs.phone() || !imagesOnly(p)) return false;
                 if (fileCb != null) fileCb.onReceiveValue(null);
                 fileCb = cb;
+                // "Take photo" (input capture=...): the camera opens and the photo is saved to the gallery AND sent back
+                if (p.isCaptureEnabled() && startCapture()) return true;
                 try {
                     startActivityForResult(MediaApps.picker(p.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE), REQ_PICK);
                     return true;
@@ -265,7 +267,43 @@ public class KioskActivity extends Activity implements Core.Host {
     }
 
     private static final int REQ_PICK = 42;
+    private static final int REQ_CAPTURE = 43;
     private ValueCallback<Uri[]> fileCb;
+    private Uri captureUri;
+
+    /** New gallery entry DCIM/RSR/RSR_<date>_<time>.jpg, then the camera fills it. False = cannot (picker instead). */
+    private boolean startCapture() {
+        if (Build.VERSION.SDK_INT < 29) return false;
+        Uri u = null;
+        try {
+            java.util.Calendar k = java.util.Calendar.getInstance();
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, Mode.captureName(k.get(java.util.Calendar.YEAR),
+                    k.get(java.util.Calendar.MONTH) + 1, k.get(java.util.Calendar.DAY_OF_MONTH), k.get(java.util.Calendar.HOUR_OF_DAY),
+                    k.get(java.util.Calendar.MINUTE), k.get(java.util.Calendar.SECOND)));
+            cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, Mode.CAPTURE_FOLDER);
+            u = getContentResolver().insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+            if (u == null) return false;
+            Intent i = MediaApps.capture(this, u);
+            if (i == null) { getContentResolver().delete(u, null, null); return false; }
+            captureUri = u;
+            startActivityForResult(i, REQ_CAPTURE);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "capture", e);
+            if (u != null) try { getContentResolver().delete(u, null, null); } catch (Exception ignored) { }
+            captureUri = null;
+            return false;
+        }
+    }
+
+    /** True if the camera really wrote a photo into u (some cameras answer OK with nothing saved). */
+    private boolean hasPhoto(Uri u) {
+        try (java.io.InputStream in = getContentResolver().openInputStream(u)) {
+            return in != null && in.read() >= 0;
+        } catch (Exception e) { return false; }
+    }
 
     private static boolean imagesOnly(WebChromeClient.FileChooserParams p) {
         String[] t = p == null ? null : p.getAcceptTypes();
@@ -277,6 +315,14 @@ public class KioskActivity extends Activity implements Core.Host {
     @Override
     protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
+        if (code == REQ_CAPTURE) {
+            ValueCallback<Uri[]> cb = fileCb; Uri u = captureUri;
+            fileCb = null; captureUri = null;
+            boolean ok = u != null && result == RESULT_OK && hasPhoto(u);
+            if (!ok && u != null) try { getContentResolver().delete(u, null, null); } catch (Exception ignored) { }   // no empty gallery entry
+            if (cb != null) cb.onReceiveValue(ok ? new Uri[]{u} : null);
+            return;
+        }
         if (code != REQ_PICK) return;
         ValueCallback<Uri[]> cb = fileCb;
         fileCb = null;

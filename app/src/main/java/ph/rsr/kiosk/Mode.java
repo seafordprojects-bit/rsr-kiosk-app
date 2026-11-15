@@ -49,6 +49,13 @@ final class Mode {
      *  so the in-charge can never get stuck in the Camera or Gallery. Tablets: no Home button. */
     static boolean phoneHomeButton(boolean phone) { return phone; }
 
+    /** "+ Before / + After" -> Take photo (owner 2026-11-15): the camera writes the photo straight into the
+     *  phone's gallery (album DCIM/RSR), and the same photo goes to the job order. */
+    static final String CAPTURE_FOLDER = "DCIM/RSR";
+    static String captureName(int y, int mo, int d, int h, int mi, int s) {
+        return String.format(java.util.Locale.ROOT, "RSR_%04d%02d%02d_%02d%02d%02d.jpg", y, mo, d, h, mi, s);
+    }
+
     /** True for an RSR Job Monitoring page (path contains /monitoring/). Query and #hash are ignored. */
     static boolean isPhoneUrl(String url) {
         if (url == null) return false;

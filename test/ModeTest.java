@@ -51,6 +51,10 @@ public class ModeTest {
         ok(tab.length == 1 && tab[0].equals("ph.rsr.kiosk"), "tablet: still only the RSR app");
         ok(Mode.lockPackages("ph.rsr.kiosk", true, null).length == 1, "phone with no camera/gallery found: only the RSR app");
         ok(Mode.phoneHomeButton(true) && !Mode.phoneHomeButton(false), "Home button only on the phone (it brings back RSR)");
+        // "+ Before / + After" -> Take photo (owner 2026-11-15): the camera saves into the gallery as DCIM/RSR/RSR_<date>_<time>.jpg
+        ok("RSR_20261115_115802.jpg".equals(Mode.captureName(2026, 11, 15, 11, 58, 2)), "taken photo name: RSR_yyyyMMdd_HHmmss.jpg");
+        ok("RSR_20260102_030405.jpg".equals(Mode.captureName(2026, 1, 2, 3, 4, 5)), "taken photo name: zero-padded");
+        ok("DCIM/RSR".equals(Mode.CAPTURE_FOLDER), "taken photos go to the phone's DCIM/RSR album");
         ok(Mode.PHONE_SCREEN_TIMEOUT_MS == 60_000, "phone screen turns off after 1 min without a touch");
 
         // build-14: punch-rush protection is for kiosk tablets only; the roll-call phone has no punches.
