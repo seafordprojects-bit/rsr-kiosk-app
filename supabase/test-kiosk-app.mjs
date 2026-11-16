@@ -587,6 +587,9 @@ await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen on 
 ok((await q(`select count(*)::int n from kiosk_app_events where device_id=$1 and event='screen on failed'`,[B6]))[0].n===1,'"screen on failed" event logged');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select msg from sent`)).some(x=>x.msg.includes('screen did NOT turn on by itself')),'"screen on failed" goes to Telegram');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen woken by phone call'});
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('screen woken by your phone call')).length===1,'call wake confirmed on Telegram once');
 // downtime: an outage reported for time already on mobile data is counted once
 await q(`delete from kiosk_app_conn where device_id=$1`,[B6]);
 await q(`insert into kiosk_app_conn(device_id,kind,started_at,ended_at) values ($1,'mobile',now()-interval '3 hours',now()-interval '10 minutes'),($1,'offline',now()-interval '2 hours 10 minutes',now()-interval '10 minutes')`,[B6]);

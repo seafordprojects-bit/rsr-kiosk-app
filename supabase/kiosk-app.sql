@@ -314,7 +314,7 @@ declare
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
   -- Only exact app messages go into the log (they end up in Telegram); anything else is dropped.
-  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try)$' then
+  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try|screen woken by phone call)$' then
     v_ev := '';
   end if;
   -- TOKEN: the first report of a tablet gets a secret. Until the tablet has sent it back once
@@ -1380,11 +1380,12 @@ begin
             order by ev.at loop
     if e.event like 'tablet restarted%' or e.event like 'updated to build%'
        or e.event like 'maintenance opened%' or e.event like 'update install failed%'
-       or e.event like 'installing build%' or e.event = 'screen on failed' then
+       or e.event like 'installing build%' or e.event in ('screen on failed', 'screen woken by phone call') then
       v_sent := v_sent + 1;
       exit when v_sent > 5;                       -- at most 5 event messages per 5-minute tick
       perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - '
               || case when e.event = 'screen on failed' then 'screen did NOT turn on by itself. Press the power button; check the Tablets page.'
+                      when e.event = 'screen woken by phone call' then 'screen woken by your phone call.'
                       else e.event end || ' (' 
               || to_char(e.at at time zone 'Asia/Manila', 'HH12:MI AM') || ')');
     end if;

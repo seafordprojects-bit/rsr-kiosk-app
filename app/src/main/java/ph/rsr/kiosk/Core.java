@@ -190,6 +190,41 @@ final class Core {
         scheduleReportAlarm();
         scheduleUpdateAlarm();
         scheduleCheckin();
+        watchCalls();
+    }
+
+    // ---- build-6: a phone call to the tablet's SIM wakes the kiosk (owner 2026-11-16) -------------
+    // Backup when "Screen on" cannot reach the tablet (Wi-Fi down, deep sleep): call the SIM number. Owner's test
+    // 2026-11-16: the full lock already keeps the call silent with no call screen, and Android lights the screen.
+    // Here the kiosk page is also brought back (black idle screen lifted, brightness restored), the idle screen-off
+    // counts from the call, and the office is told. The caller's number is never read or stored. Any caller works
+    // (a spam call only lights the screen for a few minutes). Phone mode: not used.
+    private long lastCallWake = 0;
+
+    private void watchCalls() {
+        try {
+            ctx.registerReceiver(new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent i) {
+                    if (!android.telephony.TelephonyManager.EXTRA_STATE_RINGING.equals(
+                            i.getStringExtra(android.telephony.TelephonyManager.EXTRA_STATE))) return;
+                    callWake();
+                }
+            }, new IntentFilter(android.telephony.TelephonyManager.ACTION_PHONE_STATE_CHANGED));
+        } catch (Exception e) {
+            Log.w(TAG, "watch calls", e);
+        }
+    }
+
+    private void callWake() {
+        if (prefs.phone()) return;
+        long now = System.currentTimeMillis();
+        if (now - lastCallWake < 60_000) return;   // one ringing call = one wake
+        lastCallWake = now;
+        touched();
+        if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreenChecked();
+        reportEvent("screen woken by phone call");
+        beatSoon();
     }
 
     // ---- build-6: hourly check-in while the screen is off on battery ----------------------------
