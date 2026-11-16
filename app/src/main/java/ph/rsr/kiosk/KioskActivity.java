@@ -628,6 +628,20 @@ public class KioskActivity extends Activity implements Core.Host {
         // Back does nothing in the kiosk.
     }
 
+    /**
+     * Owner 2026-11-16: workers could change the volume with the side buttons (and could turn the ringtone back up
+     * after it was set to 0 for the call wake). On the kiosk screen the volume buttons now do nothing. In settings
+     * (maintenance, passcode) they work as usual, so the owner can still set volumes there.
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int k = e.getKeyCode();
+        if (k == KeyEvent.KEYCODE_VOLUME_UP || k == KeyEvent.KEYCODE_VOLUME_DOWN || k == KeyEvent.KEYCODE_VOLUME_MUTE) {
+            return true;   // swallowed: no volume change, no volume panel
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
         if (code == KeyEvent.KEYCODE_BACK) return true;
