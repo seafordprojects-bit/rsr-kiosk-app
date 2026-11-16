@@ -566,6 +566,7 @@ if (mh>=8 && mh<20) {
   ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('no load recorded yet for its GOMO SIM')).length===1,'no load recorded: one reminder a month');
 } else { console.log('SKIP SIM reminder tests (run between 8 AM and 8 PM Manila)'); }
 // "I just loaded": no text in 30 min -> ask for the screenshot, once; a text in time -> nothing
+await q(`delete from kiosk_app_loads where device_id=$1`,[B6]);
 await q(`select public.kiosk_app_load_wait('123456',$1)`,[B6]);
 await q(`update kiosk_app_devices set load_wait_from=now()-interval '31 minutes' where device_id=$1`,[B6]);
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
@@ -607,6 +608,7 @@ ok((await q(`select msg from sent`)).some(x=>x.msg.includes('screen did NOT turn
 await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen woken by phone call'});
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('screen woken by your phone call')).length===1,'call wake confirmed on Telegram once');
+await q(`update kiosk_app_events set at=now()-interval '20 seconds' where device_id=$1 and event='screen woken by phone call'`,[B6]);
 await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen woken by phone call'});
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('phone call')).length===1,'second call: its own Telegram (every call)');

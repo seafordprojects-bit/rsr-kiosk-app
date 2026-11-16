@@ -304,7 +304,9 @@ begin
   returning * into d;
   if v_ev <> '' and v_ev <> 'started'
      and not exists (select 1 from public.kiosk_app_events x
-                      where x.device_id = v_id and x.event = v_ev and x.at > now() - interval '60 seconds')
+                      where x.device_id = v_id and x.event = v_ev
+                        and x.at > now() - case when v_ev = 'screen woken by phone call' then interval '15 seconds'
+                                                else interval '60 seconds' end)
      and (select count(*) from public.kiosk_app_events x
            where x.device_id = v_id and x.at > now() - interval '1 hour') < 20 then
     insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
