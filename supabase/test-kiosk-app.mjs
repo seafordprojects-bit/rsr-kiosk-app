@@ -11,6 +11,7 @@ let fails = 0; const ok = (cond, msg) => { console.log((cond?'PASS ':'FAIL ')+ms
 await c.query(`
 create role anon; create role authenticated;
 create table public.attendance_records(id int);
+create table public.kiosk_health(device_id text primary key, site text, stuck_count int not null default 0, queue_length int not null default 0, stuck_details jsonb, offline_queue_length int not null default 0, oldest_unsynced_at timestamptz, last_seen timestamptz not null default now());
 create schema cron; create table cron.job(jobid serial, jobname text, schedule text, command text, active boolean default true);
 create function cron.schedule(n text, s text, cmd text) returns bigint language sql as $$ insert into cron.job(jobname,schedule,command) values (n,s,cmd) returning jobid::bigint $$;
 create function cron.unschedule(n text) returns boolean language plpgsql as $$ begin delete from cron.job where jobname=n; if not found then raise exception 'no job'; end if; return true; end $$;
@@ -402,6 +403,177 @@ await q(`select public.kiosk_app_tick()`);
 ok((await q(`select phone_mode from kiosk_app_devices where device_id='app-ph1'`))[0].phone_mode===false,'re-pointed to /kiosk/ = tablet again');
 await q(`delete from kiosk_app_devices where device_id='app-ph1'`);
 await q(`delete from sent`);
+
+// ===================== BUILD-6 (2026-11-16) =====================
+{
+await q(`delete from sent`);
+const B6='app-b6tab', MAN=`https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Mandaue`;
+await beat({device_id:B6,name:'Mandaue Kiosk',battery:90,charging:true,screen_on:true,page_url:MAN,kiosk_device_id:'kd-1',net_type:'wifi',
+            sim_operator:'GOMO<script>',sim_state:'ready',sms_ok:true,mobile_ok:true,mobile_signal:3});
+let D=(await q(`select * from kiosk_app_devices where device_id=$1`,[B6]))[0];
+ok(D.net_type==='wifi' && D.sim_operator==='GOMOscript' && D.sim_state==='ready' && D.sms_ok===true && D.mobile_signal===3,'beat saves connection + SIM info (cleaned)');
+// stuck punches from the kiosk page's own report
+await q(`insert into kiosk_health(device_id, stuck_count, queue_length, stuck_details, offline_queue_length) values ('kd-1',1,3,'[{"name":"Juan","date":"2026-11-16","times":"in 07:58 AM","reason":"server rejected"}]',2)`);
+let LB=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===B6);
+ok(LB.punches && LB.punches.stuck===1 && LB.punches.queue===3 && LB.punches.offline_queue===2 && LB.punches.stuck_details[0].name==='Juan','list shows waiting + stuck punches with names');
+ok(LB.net.type==='wifi' && LB.net.down_today_min===0 && Array.isArray(LB.net.periods),'list shows connection, no downtime yet');
+ok(LB.sim.operator==='GOMOscript' && LB.sim.load===null && LB.sim.texts.length===0,'list shows SIM card, no load yet');
+// Wi-Fi down -> mobile data: a period opens; 30 min later one alert; back on Wi-Fi closes it + one message
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'mobile'});
+ok((await q(`select count(*)::int n from kiosk_app_conn where device_id=$1 and kind='mobile' and ended_at is null`,[B6]))[0].n===1,'leaving Wi-Fi opens a downtime period');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'mobile'});
+ok((await q(`select count(*)::int n from kiosk_app_conn where device_id=$1`,[B6]))[0].n===1,'same state: no second period');
+await q(`update kiosk_app_devices set net_since=now()-interval '35 minutes' where device_id=$1`,[B6]);
+await q(`update kiosk_app_conn set started_at=now()-interval '35 minutes' where device_id=$1`,[B6]);
+await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is on MOBILE DATA for 35 min%'`))[0].n===1,'on mobile data 30+ min: one alert');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'wifi'});
+await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is back on Wi-Fi. It was on mobile data 35 min%'`))[0].n===1,'back on Wi-Fi: one message with how long');
+LB=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===B6);
+ok(LB.net.down_7d_min>=34 && LB.net.down_7d_min<=36 && LB.net.periods[0].kind==='mobile' && LB.net.periods[0].to,'downtime 7 days counts the closed period');
+// outage reported by the tablet when it is back -> closed offline period
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'wifi',outage:{minutes:12,reason:'Wi-Fi off / not connected',from:'x',to:'y'}});
+ok((await q(`select count(*)::int n from kiosk_app_conn where device_id=$1 and kind='offline' and ended_at is not null and reason like 'Wi-Fi off%'`,[B6]))[0].n===1,'offline outage becomes a closed period');
+// mobile data per day: only today and 2 days before, bad keys ignored, never lowered
+const td=(await q(`select to_char((now() at time zone 'Asia/Manila')::date,'YYYY-MM-DD') d`))[0].d;
+const old=(await q(`select to_char((now() at time zone 'Asia/Manila')::date-10,'YYYY-MM-DD') d`))[0].d;
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,mobile_days:{[td]:52428800,[old]:999,'2026-02-30':5,'x':1}});
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,mobile_days:{[td]:1000}});
+let DD=await q(`select day::text, bytes::bigint from kiosk_app_data_days where device_id=$1`,[B6]);
+ok(DD.length===1 && DD[0].day===td && Number(DD[0].bytes)===52428800,'data days: today only, bad dates ignored, never lowered');
+// telco texts
+const tok=TOK[B6];
+const sms=async (from, body, at) => (await q(`select public.kiosk_app_sms_put($1,$2,$3,$4,$5) r`,[B6,tok,from,body,at||null]))[0].r;
+ok((await sms('GOMO','x')).ok && true,'text accepted with the tablet secret');
+ok((await q(`select public.kiosk_app_sms_put($1,'bad','GOMO','hi',null) r`,[B6]))[0].r.error==='token','text with a wrong secret refused');
+ok((await sms('+639171234567','Hi boss, utang nako')).ignored===true && (await q(`select count(*)::int n from kiosk_app_sms where body like 'Hi boss%'`))[0].n===0,'personal number text never stored');
+ok((await sms('09171234567','hello')).ignored===true,'personal number (09..) never stored');
+await q(`delete from kiosk_app_sms`);
+let rr=await sms('GOMO','You have successfully registered to GO+99 with 25GB data valid for 30 days. Thank you!');
+ok(rr.ok,'load text accepted');
+ok((await sms('GOMO','You have successfully registered to GO+99 with 25GB data valid for 30 days. Thank you!')).duplicate===true,'same text again = duplicate, not a second load');
+let LD=await q(`select * from kiosk_app_loads where device_id=$1`,[B6]);
+ok(LD.length===1 && Number(LD[0].gb)===25 && LD[0].source==='text','load text -> load recorded by itself (25 GB)');
+const exp30=(await q(`select ((now() at time zone 'Asia/Manila')::date + 30)::text d`))[0].d;
+ok((await q(`select expires_on::text e from kiosk_app_loads where device_id=$1`,[B6]))[0].e===exp30,'valid for 30 days -> expiry = load day + 30');
+await sms('DITO','Your 365-day promo is valid until Nov 16, 2027. You have successfully subscribed. Data: 1.5GB');
+ok((await q(`select expires_on::text e, gb from kiosk_app_loads where device_id=$1 order by id desc limit 1`,[B6]))[0].e==='2027-11-16','valid until Nov 16, 2027 read');
+await sms('GOMO','Your data promo will expire on 12/20/2026. Reload now to keep surfing.');
+await sms('GOMO','Your GO+99 promo has expired. Reload now.');
+await sms('GOMO','Your data is running low. Only 500MB left.');
+await sms('SHOPEE','11.11 sale! Free shipping');
+let K=(await q(`select kind from kiosk_app_sms where device_id=$1 order by id`,[B6])).map(x=>x.kind).join(',');
+ok(K==='load,load,expiring,expired,low,other','texts sorted: load, load, expiring, expired, low, other ('+K+')');
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+let SM=(await q(`select msg from sent order by id`)).map(x=>x.msg);
+ok(SM.some(m=>m.includes('LOAD RECEIVED (GOMOscript text') && m.includes(': 25 GB, expires')),'Telegram: load received with GB');
+ok(SM.some(m=>m.includes('(EXPIRED,')) && SM.some(m=>m.includes('(expiring,')) && SM.some(m=>m.includes('(data low,')),'Telegram: expired / expiring / low texts');
+ok(!SM.some(m=>m.includes('SHOPEE') || m.includes('11.11')),'promo spam never sent to Telegram');
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes(' text (')),'texts sent once');
+// parser edge cases
+const P=async (b)=>(await q(`select public.kiosk_app_parse_load($1,'2026-11-16') r`,[b]))[0].r;
+ok((await P('Bad date 02/30/2027 until')).expires_on===null,'impossible date never breaks parsing');
+ok((await P('Registered 500MB valid until 16 Dec 2026')).expires_on==='2026-12-16','16 Dec 2026 read');
+ok(Math.abs((await P('Registered 500MB')).gb-0.49)<0.01,'MB counted as GB');
+ok((await P('valid until Jan 5, 2020')).expires_on===null,'date before the load day ignored');
+// owner records a load (screenshot / typed)
+await q(`delete from kiosk_app_loads; delete from kiosk_app_sms`);
+let R=(await q(`select public.kiosk_app_load_add('000000',$1,'{"load_date":"2026-11-16"}') r`,[B6]))[0].r; ok(R.error==='wrong passcode','record load: wrong passcode');
+R=(await q(`select public.kiosk_app_load_add('123456',$1,$2) r`,[B6,JSON.stringify({load_date:'2099-01-01'})]))[0].r; ok(!!R.error,'record load: future date refused');
+R=(await q(`select public.kiosk_app_load_add('123456',$1,$2) r`,[B6,JSON.stringify({load_date:td,expires_on:'2020-01-01'})]))[0].r; ok(!!R.error,'record load: expiry before load refused');
+R=(await q(`select public.kiosk_app_load_add('123456',$1,$2) r`,[B6,JSON.stringify({load_date:td,gb:'abc'})]))[0].r; ok(!!R.error,'record load: bad GB refused');
+R=(await q(`select public.kiosk_app_load_add('123456',$1,$2) r`,[B6,JSON.stringify({load_date:td,shot:'<img>'})]))[0].r; ok(!!R.error,'record load: non-JPEG screenshot refused');
+R=(await q(`select public.kiosk_app_load_add('123456',$1,$2) r`,[B6,JSON.stringify({provider:'GOMO',promo:'GO+99 <b>',gb:'25',load_date:td,expires_on:exp30,source:'screenshot',shot:'/9j/AAAA'})]))[0].r;
+ok(R.ok===true,'record load from screenshot saved');
+LB=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===B6);
+ok(LB.sim.load && LB.sim.load.promo==='GO+99 b' && LB.sim.load.has_shot===true && LB.sim.load.days_left===30 && LB.sim.load.used_mb===50,'SIM card: load, proof, days left, data used since load');
+ok((await q(`select public.kiosk_app_load_shot_get('123456',$1) r`,[B6]))[0].r.jpeg==='/9j/AAAA','proof screenshot readable with passcode');
+ok((await q(`select public.kiosk_app_load_shot_get('1',$1) r`,[B6]))[0].r.error==='wrong passcode','proof needs passcode');
+// SIM provider + closing rule
+R=(await q(`select public.kiosk_app_sim_set('123456',$1,'gomo',null) r`,[B6]))[0].r;
+ok(R.ok && (await q(`select sim_provider, sim_close_days from kiosk_app_devices where device_id=$1`,[B6]))[0].sim_close_days===365,'GOMO: closes after 365 days by default');
+ok((await q(`select public.kiosk_app_sim_set('123456',$1,'DITO',5) r`,[B6]))[0].r.error,'closing days under 30 refused');
+const mh=(await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h;
+if (mh>=8 && mh<20) {
+  // expiry reminders: 3 days before -> one message; nothing again; expired -> one message
+  await q(`update kiosk_app_loads set expires_on=(now() at time zone 'Asia/Manila')::date+3 where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  SM=(await q(`select msg from sent`)).map(x=>x.msg);
+  ok(SM.filter(m=>m.includes('load expires in 3 days')).length===1,'expiry: 3 days before, once');
+  await q(`update kiosk_app_loads set expires_on=(now() at time zone 'Asia/Manila')::date where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('load EXPIRED today')).length===1,'expired today: once');
+  // long load: 30-day reminder, not the 7-day one at the same time (fresh reminders, as for a new load)
+  await q(`update kiosk_app_devices set sim_alerts='{}' where device_id=$1`,[B6]);
+  await q(`update kiosk_app_loads set load_date=(now() at time zone 'Asia/Manila')::date-300, expires_on=(now() at time zone 'Asia/Manila')::date+25 where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+  SM=(await q(`select msg from sent`)).map(x=>x.msg);
+  ok(SM.filter(m=>m.includes('load expires in 25 days')).length===1,'365-day load: 30-day reminder');
+  // number closing: GOMO 365 days since the last load -> 30 then 7 days before
+  ok(!SM.some(m=>m.includes('number closes')),'closing not yet (65 days left)');
+  await q(`update kiosk_app_loads set load_date=(now() at time zone 'Asia/Manila')::date-340 where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('number closes in 25 days')).length===1,'number closing: 30-day warning once');
+  await q(`update kiosk_app_loads set load_date=(now() at time zone 'Asia/Manila')::date-360 where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('NUMBER WILL CLOSE in 5 days')).length===1,'number closing: 7-day warning once');
+  // 80% data used
+  await q(`update kiosk_app_loads set gb=0.05 where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('(80%+)')).length===1,'80% of the data used: once');
+  // a NEW load starts fresh reminders
+  await q(`select public.kiosk_app_load_add('123456',$1,$2)`,[B6,JSON.stringify({load_date:td,expires_on:(await q(`select ((now() at time zone 'Asia/Manila')::date+2)::text d`))[0].d,source:'typed'})]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('load expires in 2 days')).length===1,'new load: its own reminders');
+  const maxId=(await q(`select max(id)::text m from kiosk_app_loads`))[0].m;
+  ok(Object.keys((await q(`select sim_alerts from kiosk_app_devices where device_id=$1`,[B6]))[0].sim_alerts).every(k=>k.endsWith(':'+maxId)),'old load reminders cleaned out');
+  // no load recorded at all -> one reminder this month
+  await q(`delete from kiosk_app_loads where device_id=$1`,[B6]); await q(`update kiosk_app_devices set sim_alerts='{}' where device_id=$1`,[B6]);
+  await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+  ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('no load recorded yet for its GOMO SIM')).length===1,'no load recorded: one reminder a month');
+} else { console.log('SKIP SIM reminder tests (run between 8 AM and 8 PM Manila)'); }
+// "I just loaded": no text in 30 min -> ask for the screenshot, once; a text in time -> nothing
+await q(`select public.kiosk_app_load_wait('123456',$1)`,[B6]);
+await q(`update kiosk_app_devices set load_wait_from=now()-interval '31 minutes' where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('no GOMO text reached the tablet in 30 min')).length===1,'no load text after "I just loaded": asks for the screenshot once');
+await q(`select public.kiosk_app_load_wait('123456',$1)`,[B6]);
+await sms('GOMO','You have successfully registered to GO+50 with 10GB valid for 7 days.');
+await q(`update kiosk_app_devices set load_wait_from=now()-interval '31 minutes' where device_id=$1`,[B6]);
+await q(`update kiosk_app_loads set created_at=now() where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('no GOMO text reached')),'load text came in time: no screenshot request');
+// mobile data not working 30 min -> one alert; works again with no load -> asks for the screenshot
+await q(`delete from kiosk_app_loads where device_id=$1`,[B6]);
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'wifi',mobile_ok:false,sim_state:'ready'});
+await q(`update kiosk_app_devices set mobile_bad_since=now()-interval '40 minutes' where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('mobile data is NOT working')).length===1,'mobile data not working 30 min: one alert');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'wifi',mobile_ok:true});
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('mobile data works again') && x.msg.includes('send the screenshot')).length===1,'works again without a load text: asks for the screenshot');
+// set Wi-Fi: validated, password never logged, removed on ack
+R=(await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2) r`,[B6,JSON.stringify({ssid:'RSR "x"',pass:'12345678'})]))[0].r; ok(!!R.error,'Wi-Fi name with quotes refused');
+R=(await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2) r`,[B6,JSON.stringify({ssid:'RSR Mandaue',pass:'short'})]))[0].r; ok(!!R.error,'Wi-Fi password under 8 refused');
+R=(await q(`select public.kiosk_app_command('123456',$1,'set_wifi','not json') r`,[B6]))[0].r; ok(!!R.error,'unreadable Wi-Fi details refused');
+R=(await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2) r`,[B6,JSON.stringify({ssid:'RSR Mandaue',pass:'s3cretPass!'})]))[0].r; ok(R.ok,'Set Wi-Fi queued');
+ok(!(await q(`select event from kiosk_app_events where device_id=$1`,[B6])).some(x=>x.event.includes('s3cretPass')),'password never in the event log');
+ok(!JSON.stringify((await q(`select public.kiosk_app_list('123456') r`))[0].r).includes('s3cretPass'),'password never in the Tablets page list');
+rr=await beat({device_id:B6,battery:90,charging:true,page_url:MAN});
+ok(rr.cmd==='set_wifi' && JSON.parse(rr.arg).pass==='s3cretPass!' && JSON.parse(rr.arg).switch===true,'tablet receives the Wi-Fi details');
+await q(`select public.kiosk_app_ack($1,$2,$3,'done: added RSR Mandaue')`,[B6,TOK[B6],rr.cmd_id]);
+ok((await q(`select cmd_arg from kiosk_app_devices where device_id=$1`,[B6]))[0].cmd_arg===null,'password removed from the server after the tablet confirms');
+await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2)`,[B6,JSON.stringify({ssid:'RSR Mandaue',pass:'s3cretPass!'})]);
+await q(`update kiosk_app_devices set cmd_at=now()-interval '31 minutes' where device_id=$1`,[B6]); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select cmd_arg from kiosk_app_devices where device_id=$1`,[B6]))[0].cmd_arg===null,'unclaimed Wi-Fi password removed after 30 min');
+R=(await q(`select public.kiosk_app_command('123456',$1,'retry_punches','') r`,[B6]))[0].r; ok(R.ok,'Retry stuck punches command accepted');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen on failed'});
+ok((await q(`select count(*)::int n from kiosk_app_events where device_id=$1 and event='screen on failed'`,[B6]))[0].n===1,'"screen on failed" event logged');
+// forget removes build-6 rows too? (kept: loads are history) - tick cleanup keeps loads
+await q(`delete from sent`);
+}
 
 // anon cannot read tables
 await c.query(`grant usage on schema public to anon`);

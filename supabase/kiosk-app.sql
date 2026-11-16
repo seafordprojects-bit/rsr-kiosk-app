@@ -125,6 +125,81 @@ create table if not exists public.kiosk_app_events (
 create index if not exists kiosk_app_events_dev_at on public.kiosk_app_events (device_id, at desc);
 revoke all on public.kiosk_app_events from anon, authenticated;
 
+-- BUILD-6 (2026-11-16): connection type + Wi-Fi downtime, SIM + mobile data, telco texts, load records.
+alter table public.kiosk_app_devices add column if not exists net_type          text;          -- wifi / mobile / none
+alter table public.kiosk_app_devices add column if not exists net_since         timestamptz;   -- when the current net_type started
+alter table public.kiosk_app_devices add column if not exists mobile_alerted    boolean not null default false;
+alter table public.kiosk_app_devices add column if not exists mobile_signal     integer;       -- 0-4
+alter table public.kiosk_app_devices add column if not exists mobile_ok         boolean;       -- mobile data works (null = no SIM data network)
+alter table public.kiosk_app_devices add column if not exists mobile_bad_since  timestamptz;
+alter table public.kiosk_app_devices add column if not exists mobile_bad_alerted boolean not null default false;
+alter table public.kiosk_app_devices add column if not exists sim_operator      text;          -- what the SIM says (e.g. DITO, GOMO)
+alter table public.kiosk_app_devices add column if not exists sim_state         text;          -- ready / absent / locked / unknown
+alter table public.kiosk_app_devices add column if not exists sms_ok            boolean;       -- the app may read incoming texts
+alter table public.kiosk_app_devices add column if not exists sim_provider      text;          -- set by the owner: DITO / GOMO / ...
+alter table public.kiosk_app_devices add column if not exists sim_close_days    integer;       -- number closes after this many days without a load
+alter table public.kiosk_app_devices add column if not exists sim_alerts        jsonb not null default '{}'::jsonb;  -- reminders already sent
+alter table public.kiosk_app_devices add column if not exists load_wait_from    timestamptz;   -- owner pressed "I just loaded"
+
+-- Wi-Fi downtime: one row per period the tablet was NOT on Wi-Fi (on mobile data, or offline).
+create table if not exists public.kiosk_app_conn (
+  id          bigserial primary key,
+  device_id   text not null,
+  kind        text not null check (kind in ('mobile','none','offline')),
+  started_at  timestamptz not null,
+  ended_at    timestamptz,
+  reason      text
+);
+create index if not exists kiosk_app_conn_dev on public.kiosk_app_conn (device_id, started_at desc);
+revoke all on public.kiosk_app_conn from anon, authenticated;
+
+-- mobile data used per day (bytes, Android's own counter), for "used since the last load"
+create table if not exists public.kiosk_app_data_days (
+  device_id  text not null,
+  day        date not null,
+  bytes      bigint not null default 0,
+  primary key (device_id, day)
+);
+revoke all on public.kiosk_app_data_days from anon, authenticated;
+
+-- texts from the telco to the tablet's SIM (personal numbers are never sent by the app)
+create table if not exists public.kiosk_app_sms (
+  id           bigserial primary key,
+  device_id    text not null,
+  sender       text not null,
+  body         text not null,
+  received_at  timestamptz not null default now(),
+  kind         text not null default 'other',   -- load / expiring / expired / low / other
+  notified     boolean not null default false,
+  load_id      bigint
+);
+create index if not exists kiosk_app_sms_dev on public.kiosk_app_sms (device_id, received_at desc);
+revoke all on public.kiosk_app_sms from anon, authenticated;
+
+-- SIM loads (history, never overwritten): from a telco text, a screenshot, or typed by the owner
+create table if not exists public.kiosk_app_loads (
+  id          bigserial primary key,
+  device_id   text not null,
+  provider    text,
+  promo       text,
+  gb          numeric(7,2),
+  load_date   date not null,
+  expires_on  date,
+  source      text not null check (source in ('text','screenshot','typed')),
+  sms_id      bigint,
+  created_at  timestamptz not null default now()
+);
+create index if not exists kiosk_app_loads_dev on public.kiosk_app_loads (device_id, load_date desc, id desc);
+revoke all on public.kiosk_app_loads from anon, authenticated;
+
+-- screenshot proof of the latest load per tablet (JPEG base64; older ones are removed)
+create table if not exists public.kiosk_app_load_shots (
+  load_id    bigint primary key,
+  device_id  text not null,
+  jpeg       text not null
+);
+revoke all on public.kiosk_app_load_shots from anon, authenticated;
+
 create sequence if not exists public.kiosk_app_cmd_seq;
 revoke all on sequence public.kiosk_app_cmd_seq from anon, authenticated;
 
@@ -138,6 +213,68 @@ exception when others then
   return null;
 end $$;
 revoke all on function public.kiosk_app_ts(text) from public, anon, authenticated;
+
+-- BUILD-6: what a telco text is about. Wording differs per telco and changes, so this only sorts the text
+-- (load / expiring / expired / low / other) and picks out GB, days and a valid-until date when it can.
+-- The owner sees the full text on the Tablets page and can correct a load by hand.
+create or replace function public.kiosk_app_sms_kind(p_body text)
+returns text language sql immutable as $$
+  select case
+    when p_body ~* '(has expired|have expired|is expired|already expired|expired na|nag-?expire na)' then 'expired'
+    when p_body ~* '(you have (successfully )?(registered|subscribed|purchased|bought|loaded)|successfully (registered|subscribed|purchased|loaded|reloaded)|registration .*successful|you are now (registered|subscribed)|has been (credited|added|loaded)|load (of|worth) .*received|you received|thank you for (loading|purchasing|subscribing|registering))'
+         and p_body ~* '([0-9]+(\.[0-9]+)?\s*(gb|mb)|data|valid|day|expir|promo)' then 'load'
+    when p_body ~* '(will expire|expiring|expires (on|in|today|tomorrow)|valid until|valid till)'
+         and p_body !~* '(you have (successfully )?(registered|subscribed|purchased)|successfully)' then 'expiring'
+    when p_body ~* '(running low|is low|low data|only [0-9.]+\s*(gb|mb).* left|remaining (data|balance).* [0-9.]+\s*(gb|mb)|used up|consumed)' then 'low'
+    else 'other' end
+$$;
+revoke all on function public.kiosk_app_sms_kind(text) from public, anon, authenticated;
+
+-- first date in text: "Dec 16, 2026" / "16 Dec 2026" / "12/16/2026" (PH month first) / "2026-12-16"; null if none
+create or replace function public.kiosk_app_text_date(p text)
+returns date language plpgsql immutable as $$
+declare m text[]; mon int;
+begin
+  if p is null then return null; end if;
+  m := regexp_match(p, '(20[0-9]{2})-([0-9]{1,2})-([0-9]{1,2})');
+  if m is not null then return make_date(m[1]::int, m[2]::int, m[3]::int); end if;
+  m := regexp_match(lower(p), '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+([0-9]{1,2})(st|nd|rd|th)?,?\s+(20[0-9]{2})');
+  if m is not null then
+    mon := array_position(array['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'], m[1]);
+    return make_date(m[4]::int, mon, m[2]::int);
+  end if;
+  m := regexp_match(lower(p), '([0-9]{1,2})(st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?\s+(20[0-9]{2})');
+  if m is not null then
+    mon := array_position(array['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'], m[3]);
+    return make_date(m[4]::int, mon, m[1]::int);
+  end if;
+  m := regexp_match(p, '([0-9]{1,2})/([0-9]{1,2})/(20[0-9]{2})');
+  if m is not null then return make_date(m[3]::int, m[1]::int, m[2]::int); end if;
+  return null;
+exception when others then
+  return null;   -- 02/30/2026 and the like: no date rather than an error
+end $$;
+revoke all on function public.kiosk_app_text_date(text) from public, anon, authenticated;
+
+-- GB, days and valid-until out of a load text. p_on = the day the text came (Manila).
+create or replace function public.kiosk_app_parse_load(p_body text, p_on date)
+returns jsonb language plpgsql immutable as $$
+declare v_gb numeric; v_days int; v_until date; m text[]; v_after text;
+begin
+  select max(x[1]::numeric) into v_gb from regexp_matches(coalesce(p_body,''), '([0-9]+(\.[0-9]+)?)\s*GB', 'gi') x;
+  if v_gb is null then
+    select max(x[1]::numeric) / 1024.0 into v_gb from regexp_matches(coalesce(p_body,''), '([0-9]+(\.[0-9]+)?)\s*MB', 'gi') x;
+  end if;
+  m := regexp_match(coalesce(p_body,''), '([0-9]{1,3})\s*(-\s*)?days?', 'i');
+  if m is not null then v_days := m[1]::int; end if;
+  v_after := (regexp_match(coalesce(p_body,''), '(valid until|valid till|valid thru|valid through|until|till|expires on|expiring on|expiry|expire on|exp\.?)(.*)$', 'i'))[2];
+  v_until := public.kiosk_app_text_date(v_after);
+  if v_until is not null and (v_until < p_on or v_until > p_on + 800) then v_until := null; end if;
+  if v_until is null and v_days between 1 and 800 then v_until := p_on + v_days; end if;
+  return jsonb_build_object('gb', case when v_gb between 0.01 and 99999 then round(v_gb, 2) end,
+                            'days', v_days, 'expires_on', v_until);
+end $$;
+revoke all on function public.kiosk_app_parse_load(text, date) from public, anon, authenticated;
 
 -- STEP 2 - heartbeat from the app (anon). Returns the pending office command, if any.
 create or replace function public.kiosk_app_beat(p jsonb)
@@ -155,10 +292,15 @@ declare
   v_conf boolean;
   v_cs   text := case when p->>'charge_state' in ('charging','full','discharging','not_charging') then p->>'charge_state' end;
   d      public.kiosk_app_devices%rowtype;
+  v_nt   text := case when p->>'net_type' in ('wifi','mobile','none') then p->>'net_type' end;
+  v_old_nt text;
+  v_mok  boolean := case when jsonb_typeof(p->'mobile_ok') = 'boolean' then (p->>'mobile_ok')::boolean end;
+  v_day  text;
+  v_today date := (now() at time zone 'Asia/Manila')::date;
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
   -- Only exact app messages go into the log (they end up in Telegram); anything else is dropped.
-  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3})$' then
+  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try)$' then
     v_ev := '';
   end if;
   -- TOKEN: the first report of a tablet gets a secret. Until the tablet has sent it back once
@@ -186,7 +328,7 @@ begin
     insert into public.kiosk_app_devices as k (device_id, token) values (v_id, v_new)
     on conflict (device_id) do update set token = excluded.token where k.token is null;
   end if;
-  select k.last_seen into v_prev from public.kiosk_app_devices k where k.device_id = v_id;
+  select k.last_seen, k.net_type into v_prev, v_old_nt from public.kiosk_app_devices k where k.device_id = v_id;
 
   update public.kiosk_app_devices k set
     name            = coalesce(nullif(v_name, ''), k.name),
@@ -218,6 +360,15 @@ begin
     page_error_at   = case when btrim(coalesce(p->>'page_error','')) <> ''
                            then coalesce(least(public.kiosk_app_ts(p->>'page_error_at'), now()), now())
                            else k.page_error_at end,
+    net_type        = coalesce(v_nt, k.net_type),
+    net_since       = case when v_nt is not null and v_nt is distinct from k.net_type then now() else k.net_since end,
+    mobile_signal   = case when p->>'mobile_signal' ~ '^[0-4]$' then (p->>'mobile_signal')::integer end,
+    mobile_ok       = case when p ? 'mobile_ok' then v_mok else k.mobile_ok end,
+    mobile_bad_since = case when not (p ? 'mobile_ok') then k.mobile_bad_since
+                            when v_mok is false then coalesce(k.mobile_bad_since, now()) else null end,
+    sim_operator    = case when p ? 'sim_operator' then nullif(left(regexp_replace(coalesce(p->>'sim_operator',''), '[^[:alnum:] ._-]', '', 'g'), 40), '') else k.sim_operator end,
+    sim_state       = case when p->>'sim_state' in ('ready','absent','locked','unknown') then p->>'sim_state' else k.sim_state end,
+    sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -282,6 +433,32 @@ begin
     end if;
   end if;
 
+  -- BUILD-6 Wi-Fi downtime: a period starts when the tablet leaves Wi-Fi and ends when it is back on Wi-Fi.
+  if v_nt is not null and v_nt is distinct from v_old_nt then
+    update public.kiosk_app_conn c set ended_at = now()
+     where c.device_id = v_id and c.ended_at is null and c.kind in ('mobile','none');
+    if v_nt in ('mobile','none') then
+      insert into public.kiosk_app_conn (device_id, kind, started_at) values (v_id, v_nt, now());
+    end if;
+  end if;
+  -- an outage the tablet reports when it is back (no report reached us): a closed 'offline' period
+  if v_out is not null and v_out->>'minutes' ~ '^[0-9]{1,5}$' and (v_out->>'minutes')::int >= 2
+     and v_out->>'reason' in ('Wi-Fi off / not connected', 'Wi-Fi connected but no internet', 'internet OK but server not reachable')
+     and not exists (select 1 from public.kiosk_app_conn c where c.device_id = v_id and c.kind = 'offline'
+                       and c.ended_at > now() - interval '5 minutes') then
+    insert into public.kiosk_app_conn (device_id, kind, started_at, ended_at, reason)
+    values (v_id, 'offline', now() - make_interval(mins => least((v_out->>'minutes')::int, 20000)), now(), v_out->>'reason');
+  end if;
+  -- mobile data used per day (Android's counter for that day; only today and the 2 days before)
+  if jsonb_typeof(p->'mobile_days') = 'object' then
+    for v_day in select jsonb_object_keys(p->'mobile_days') loop
+      continue when v_day !~ '^20[0-9]{2}-[0-9]{2}-[0-9]{2}$' or (p->'mobile_days'->>v_day) !~ '^[0-9]{1,13}$';
+      continue when public.kiosk_app_text_date(v_day) is null or public.kiosk_app_text_date(v_day) not between v_today - 2 and v_today;
+      insert into public.kiosk_app_data_days as x (device_id, day, bytes) values (v_id, public.kiosk_app_text_date(v_day), (p->'mobile_days'->>v_day)::bigint)
+      on conflict (device_id, day) do update set bytes = greatest(x.bytes, excluded.bytes);
+    end loop;
+  end if;
+
   if d.cmd_id is not null and d.cmd_id > coalesce(d.cmd_done_id, 0)
      and d.cmd_at > now() - interval '30 minutes' then   -- an old, never-picked-up command expires
     return jsonb_build_object('cmd_id', d.cmd_id, 'cmd', d.cmd, 'arg', coalesce(d.cmd_arg,''))
@@ -300,7 +477,9 @@ begin
   update public.kiosk_app_devices k
      set cmd_done_id = greatest(coalesce(k.cmd_done_id,0), p_cmd_id),
          cmd_result  = left(regexp_replace(coalesce(p_result,''), '[<>]', '', 'g'), 200),
-         cmd_done_at = now()
+         cmd_done_at = now(),
+         -- a Wi-Fi password never stays on the server once the tablet has it
+         cmd_arg     = case when k.cmd = 'set_wifi' then null else k.cmd_arg end
    where k.device_id = p_device and k.token = p_token and k.cmd_id = p_cmd_id;
 end $$;
 revoke all on function public.kiosk_app_ack(text, text, bigint, text) from public;
@@ -321,6 +500,43 @@ begin
 end $$;
 revoke all on function public.kiosk_app_forget(text, text) from public;
 grant execute on function public.kiosk_app_forget(text, text) to anon, authenticated;
+
+-- BUILD-6 minutes NOT on Wi-Fi (mobile data or offline) since p_from, open period counted up to now
+create or replace function public.kiosk_app_down_min(p_device text, p_from timestamptz)
+returns integer language sql stable as $$
+  select coalesce(round(sum(extract(epoch from (least(coalesce(c.ended_at, now()), now()) - greatest(c.started_at, p_from))) / 60.0))::int, 0)
+    from public.kiosk_app_conn c
+   where c.device_id = p_device and coalesce(c.ended_at, now()) > p_from
+$$;
+revoke all on function public.kiosk_app_down_min(text, timestamptz) from public, anon, authenticated;
+
+-- BUILD-6 SIM card of a tablet: provider, latest load, data used since it, expiry, closing date, last texts
+create or replace function public.kiosk_app_sim_info(p_device text)
+returns jsonb language plpgsql stable as $$
+declare d public.kiosk_app_devices%rowtype; l public.kiosk_app_loads%rowtype; v_used bigint; v_today date := (now() at time zone 'Asia/Manila')::date;
+begin
+  select * into d from public.kiosk_app_devices k where k.device_id = p_device;
+  select * into l from public.kiosk_app_loads x where x.device_id = p_device order by x.load_date desc, x.id desc limit 1;
+  select coalesce(sum(x.bytes), 0) into v_used from public.kiosk_app_data_days x
+   where x.device_id = p_device and x.day >= coalesce(l.load_date, v_today);
+  return jsonb_build_object(
+    'provider', d.sim_provider, 'close_days', d.sim_close_days, 'operator', d.sim_operator, 'state', d.sim_state,
+    'sms_ok', d.sms_ok, 'load_wait_from', d.load_wait_from,
+    'data_today_mb', (select round(x.bytes / 1048576.0) from public.kiosk_app_data_days x where x.device_id = p_device and x.day = v_today),
+    'load', case when l.id is null then null else jsonb_build_object(
+              'id', l.id, 'provider', l.provider, 'promo', l.promo, 'gb', l.gb, 'load_date', l.load_date,
+              'expires_on', l.expires_on, 'source', l.source, 'days_left', l.expires_on - v_today,
+              'used_mb', round(v_used / 1048576.0),
+              'has_shot', exists (select 1 from public.kiosk_app_load_shots s where s.load_id = l.id)) end,
+    'closes_on', case when d.sim_close_days is not null and l.id is not null then l.load_date + d.sim_close_days end,
+    'loads', (select coalesce(jsonb_agg(jsonb_build_object('load_date', x.load_date, 'expires_on', x.expires_on, 'gb', x.gb,
+                                                           'promo', x.promo, 'source', x.source) order by x.load_date desc, x.id desc), '[]'::jsonb)
+                from (select * from public.kiosk_app_loads y where y.device_id = p_device order by y.load_date desc, y.id desc limit 5) x),
+    'texts', (select coalesce(jsonb_agg(jsonb_build_object('from', x.sender, 'body', x.body, 'at', x.received_at, 'kind', x.kind)
+                                        order by x.received_at desc), '[]'::jsonb)
+                from (select * from public.kiosk_app_sms y where y.device_id = p_device order by y.received_at desc limit 5) x));
+end $$;
+revoke all on function public.kiosk_app_sim_info(text) from public, anon, authenticated;
 
 -- STEP 4 - office page: list tablets (admin passcode)
 create or replace function public.kiosk_app_list(p_passcode text)
@@ -349,6 +565,22 @@ begin
            'events', (select coalesce(jsonb_agg(jsonb_build_object('event', e.event, 'at', e.at) order by e.at desc), '[]'::jsonb)
                         from (select * from public.kiosk_app_events e2 where e2.device_id = k.device_id
                                order by e2.at desc limit 5) e)
+         ) || jsonb_build_object(
+           -- BUILD-6: connection + Wi-Fi downtime
+           'net', jsonb_build_object('type', k.net_type, 'since', k.net_since, 'mobile_signal', k.mobile_signal, 'mobile_ok', k.mobile_ok,
+                    'down_today_min', public.kiosk_app_down_min(k.device_id, (date_trunc('day', now() at time zone 'Asia/Manila')) at time zone 'Asia/Manila'),
+                    'down_7d_min', public.kiosk_app_down_min(k.device_id, now() - interval '7 days'),
+                    'periods', (select coalesce(jsonb_agg(jsonb_build_object('kind', c.kind, 'from', c.started_at, 'to', c.ended_at, 'reason', c.reason)
+                                                          order by c.started_at desc), '[]'::jsonb)
+                                  from (select * from public.kiosk_app_conn c2 where c2.device_id = k.device_id
+                                         order by c2.started_at desc limit 15) c)),
+           -- BUILD-6: punches waiting / stuck on this tablet (the kiosk page's own report, kiosk_health)
+           'punches', (select jsonb_build_object('queue', h.j->'queue_length', 'offline_queue', h.j->'offline_queue_length',
+                                'stuck', h.j->'stuck_count', 'stuck_details', h.j->'stuck_details',
+                                'oldest_unsynced_at', h.j->'oldest_unsynced_at', 'reported_at', h.j->'last_seen')
+                         from (select to_jsonb(kh) as j from public.kiosk_health kh where kh.device_id = k.kiosk_device_id) h),
+           -- BUILD-6: SIM, mobile data, loads, telco texts
+           'sim', public.kiosk_app_sim_info(k.device_id)
          ) order by k.name), '[]'::jsonb)
     into v from public.kiosk_app_devices k;
   return v;
@@ -359,15 +591,35 @@ grant execute on function public.kiosk_app_list(text) to anon, authenticated;
 -- STEP 5 - office page: send a command (admin passcode)
 create or replace function public.kiosk_app_command(p_passcode text, p_device text, p_cmd text, p_arg text default '')
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
-declare v_arg text := btrim(coalesce(p_arg,''));
+declare v_arg text := btrim(coalesce(p_arg,'')); v_wifi jsonb; v_log text;
 begin
   -- Return (never raise) on a wrong passcode: raising would roll back the wrong-try counter
   -- inside admin_verify_passcode and remove its brute-force lockout.
   if not public.admin_verify_passcode(p_passcode) then
     return jsonb_build_object('error', 'wrong passcode');
   end if;
-  if p_cmd not in ('reload','hard_reload','restart','update','screen_on','screen_off','open_settings','schedule','screenshot') then
+  if p_cmd not in ('reload','hard_reload','restart','update','screen_on','screen_off','open_settings','schedule','screenshot',
+                   'retry_punches','set_wifi') then
     return jsonb_build_object('error', 'unknown command');
+  end if;
+  -- BUILD-6 Set Wi-Fi: arg = {"ssid":"RSR Mandaue","pass":"12345678","switch":true}. The password is removed
+  -- from the server as soon as the tablet confirms (kiosk_app_ack) or after 30 min (kiosk_app_tick).
+  if p_cmd = 'set_wifi' then
+    begin
+      v_wifi := v_arg::jsonb;
+    exception when others then
+      return jsonb_build_object('error', 'Wi-Fi details not readable');
+    end;
+    if jsonb_typeof(v_wifi) <> 'object' or length(coalesce(v_wifi->>'ssid','')) not between 1 and 32
+       or v_wifi->>'ssid' ~ '[[:cntrl:]"\\]' then
+      return jsonb_build_object('error', 'Wi-Fi name must be 1 to 32 characters (no quotes)');
+    end if;
+    if coalesce(v_wifi->>'pass','') <> '' and (length(v_wifi->>'pass') not between 8 and 63 or v_wifi->>'pass' ~ '[[:cntrl:]"\\]') then
+      return jsonb_build_object('error', 'Wi-Fi password must be 8 to 63 characters (no quotes), or empty for an open network');
+    end if;
+    v_arg := jsonb_build_object('ssid', v_wifi->>'ssid', 'pass', coalesce(v_wifi->>'pass',''),
+                                'switch', coalesce(v_wifi->>'switch', 'true') <> 'false')::text;
+    v_log := 'set_wifi ' || regexp_replace(v_wifi->>'ssid', '[^[:alnum:] ._-]', '', 'g');   -- never the password
   end if;
   if p_cmd = 'schedule' and v_arg <> 'off'
      and v_arg !~ '^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$' then
@@ -379,7 +631,7 @@ begin
    where k.device_id = p_device;
   if not found then return jsonb_build_object('error', 'tablet not found'); end if;
   insert into public.kiosk_app_events (device_id, event, notified)
-  values (p_device, 'office: ' || p_cmd || case when v_arg <> '' then ' ' || v_arg else '' end, true);
+  values (p_device, 'office: ' || coalesce(v_log, p_cmd || case when v_arg <> '' then ' ' || v_arg else '' end), true);
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.kiosk_app_command(text, text, text, text) from public;
@@ -419,6 +671,152 @@ begin
 end $$;
 revoke all on function public.kiosk_app_shot_get(text, text) from public;
 grant execute on function public.kiosk_app_shot_get(text, text) to anon, authenticated;
+
+-- STEP 5d - BUILD-6 telco texts. The app sends ONLY texts from telco names / short codes (never from a
+-- personal mobile number). A load text is recorded as a load by itself; the rest are kept for the
+-- Tablets page, and expiring / expired / low ones go to Telegram (kiosk_app_tick).
+create or replace function public.kiosk_app_sms_put(p_device text, p_token text, p_sender text, p_body text, p_at text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_from text := left(regexp_replace(btrim(coalesce(p_sender,'')), '[^[:alnum:] ._+-]', '', 'g'), 20);
+  v_body text := left(regexp_replace(btrim(coalesce(p_body,'')), '[<>]', '', 'g'), 1000);
+  v_at   timestamptz := coalesce(public.kiosk_app_ts(p_at), now());
+  v_kind text;
+  v_id   bigint;
+  v_load bigint;
+  v_p    jsonb;
+  d      public.kiosk_app_devices%rowtype;
+begin
+  select * into d from public.kiosk_app_devices k where k.device_id = p_device and k.token is not null and k.token = p_token;
+  if not found then return jsonb_build_object('error', 'token'); end if;
+  if v_from = '' or v_body = '' then return jsonb_build_object('error', 'empty'); end if;
+  -- a personal number is never stored, even if an old app build sent it
+  if regexp_replace(v_from, '[ +-]', '', 'g') ~ '^[0-9]{10,13}$' then return jsonb_build_object('ok', true, 'ignored', true); end if;
+  if v_at > now() or v_at < now() - interval '11 days' then v_at := now(); end if;
+  -- the app re-sends after a lost reply: same text within 10 min = the same text
+  if exists (select 1 from public.kiosk_app_sms x where x.device_id = p_device and x.sender = v_from and x.body = v_body
+               and x.received_at between v_at - interval '10 minutes' and v_at + interval '10 minutes') then
+    return jsonb_build_object('ok', true, 'duplicate', true);
+  end if;
+  if (select count(*) from public.kiosk_app_sms x where x.device_id = p_device and x.received_at > now() - interval '1 day') >= 40 then
+    return jsonb_build_object('error', 'too many texts today');
+  end if;
+  v_kind := public.kiosk_app_sms_kind(v_body);
+  insert into public.kiosk_app_sms (device_id, sender, body, received_at, kind) values (p_device, v_from, v_body, v_at, v_kind)
+  returning id into v_id;
+  if v_kind = 'load' then
+    v_p := public.kiosk_app_parse_load(v_body, (v_at at time zone 'Asia/Manila')::date);
+    insert into public.kiosk_app_loads (device_id, provider, promo, gb, load_date, expires_on, source, sms_id)
+    values (p_device, coalesce(d.sim_provider, d.sim_operator), null, (v_p->>'gb')::numeric,
+            (v_at at time zone 'Asia/Manila')::date, (v_p->>'expires_on')::date, 'text', v_id)
+    returning id into v_load;
+    update public.kiosk_app_sms x set load_id = v_load where x.id = v_id;
+  end if;
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_sms_put(text, text, text, text, text) from public;
+grant execute on function public.kiosk_app_sms_put(text, text, text, text, text) to anon, authenticated;
+
+-- STEP 5e - BUILD-6 office records a load (screenshot read on the Tablets page, or typed). Admin passcode.
+-- p_load: {"provider":"DITO","promo":"...","gb":25,"load_date":"2026-11-16","expires_on":"2027-11-16",
+--          "source":"screenshot"|"typed","shot":"<base64 JPEG, optional>"}
+create or replace function public.kiosk_app_load_add(p_passcode text, p_device text, p_load jsonb)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_today date := (now() at time zone 'Asia/Manila')::date;
+  v_ld date; v_exp date; v_gb numeric; v_id bigint; v_shot text := coalesce(p_load->>'shot', '');
+  v_src text := case when p_load->>'source' = 'screenshot' then 'screenshot' else 'typed' end;
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  if not exists (select 1 from public.kiosk_app_devices k where k.device_id = p_device) then
+    return jsonb_build_object('error', 'tablet not found');
+  end if;
+  v_ld := public.kiosk_app_text_date(p_load->>'load_date');
+  if v_ld is null or p_load->>'load_date' !~ '^20[0-9]{2}-[0-9]{2}-[0-9]{2}$' or v_ld > v_today + 1 or v_ld < v_today - 400 then
+    return jsonb_build_object('error', 'load date must be a real date (YYYY-MM-DD), not in the future');
+  end if;
+  if coalesce(p_load->>'expires_on', '') <> '' then
+    v_exp := public.kiosk_app_text_date(p_load->>'expires_on');
+    if v_exp is null or p_load->>'expires_on' !~ '^20[0-9]{2}-[0-9]{2}-[0-9]{2}$' or v_exp < v_ld or v_exp > v_ld + 800 then
+      return jsonb_build_object('error', 'expiry date must be a real date on or after the load date');
+    end if;
+  end if;
+  if coalesce(p_load->>'gb', '') <> '' then
+    if p_load->>'gb' !~ '^[0-9]{1,5}(\.[0-9]{1,2})?$' then return jsonb_build_object('error', 'GB must be a number like 25 or 1.5'); end if;
+    v_gb := (p_load->>'gb')::numeric;
+  end if;
+  if v_shot <> '' and (length(v_shot) > 900000 or v_shot !~ '^/9j/[A-Za-z0-9+/]+=*$') then
+    return jsonb_build_object('error', 'screenshot must be a JPEG under about 650 KB');
+  end if;
+  insert into public.kiosk_app_loads (device_id, provider, promo, gb, load_date, expires_on, source)
+  values (p_device,
+          nullif(left(regexp_replace(btrim(coalesce(p_load->>'provider','')), '[^[:alnum:] ._-]', '', 'g'), 20), ''),
+          nullif(left(regexp_replace(btrim(coalesce(p_load->>'promo','')), '[<>]', '', 'g'), 60), ''),
+          v_gb, v_ld, v_exp, v_src)
+  returning id into v_id;
+  if v_shot <> '' then
+    delete from public.kiosk_app_load_shots s where s.device_id = p_device;
+    insert into public.kiosk_app_load_shots (load_id, device_id, jpeg) values (v_id, p_device, v_shot);
+  end if;
+  update public.kiosk_app_devices k set load_wait_from = null where k.device_id = p_device;
+  insert into public.kiosk_app_events (device_id, event, notified)
+  values (p_device, 'office: load recorded (' || v_src || ') ' || to_char(v_ld, 'YYYY-MM-DD')
+                    || coalesce(' until ' || to_char(v_exp, 'YYYY-MM-DD'), ''), true);
+  return jsonb_build_object('ok', true, 'id', v_id);
+end $$;
+revoke all on function public.kiosk_app_load_add(text, text, jsonb) from public;
+grant execute on function public.kiosk_app_load_add(text, text, jsonb) to anon, authenticated;
+
+-- optional "I just loaded": if no telco load text reaches the tablet within 30 min, Telegram asks for the screenshot
+create or replace function public.kiosk_app_load_wait(p_passcode text, p_device text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  update public.kiosk_app_devices k set load_wait_from = now() where k.device_id = p_device;
+  if not found then return jsonb_build_object('error', 'tablet not found'); end if;
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_load_wait(text, text) from public;
+grant execute on function public.kiosk_app_load_wait(text, text) to anon, authenticated;
+
+-- SIM provider + "number closes after N days without a load" (owner: GOMO 365). Admin passcode.
+create or replace function public.kiosk_app_sim_set(p_passcode text, p_device text, p_provider text, p_close_days integer)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare v_p text := nullif(upper(left(regexp_replace(btrim(coalesce(p_provider,'')), '[^[:alnum:] ._-]', '', 'g'), 20)), '');
+        v_d integer := p_close_days;
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  if v_d is null and v_p = 'GOMO' then v_d := 365; end if;
+  if v_d is not null and v_d not between 30 and 1000 then
+    return jsonb_build_object('error', 'days without load must be 30 to 1000 (or empty)');
+  end if;
+  update public.kiosk_app_devices k set sim_provider = v_p, sim_close_days = v_d where k.device_id = p_device;
+  if not found then return jsonb_build_object('error', 'tablet not found'); end if;
+  insert into public.kiosk_app_events (device_id, event, notified)
+  values (p_device, 'office: SIM ' || coalesce(v_p, 'none') || coalesce(', closes after ' || v_d || ' days without load', ''), true);
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_sim_set(text, text, text, integer) from public;
+grant execute on function public.kiosk_app_sim_set(text, text, text, integer) to anon, authenticated;
+
+create or replace function public.kiosk_app_load_shot_get(p_passcode text, p_device text)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare v jsonb;
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  select jsonb_build_object('load_id', s.load_id, 'jpeg', s.jpeg) into v from public.kiosk_app_load_shots s where s.device_id = p_device;
+  return coalesce(v, jsonb_build_object('error', 'no screenshot yet'));
+end $$;
+revoke all on function public.kiosk_app_load_shot_get(text, text) from public;
+grant execute on function public.kiosk_app_load_shot_get(text, text) to anon, authenticated;
 
 -- STEP 6a - "1 h 25 min" style text for alerts
 create or replace function public.kiosk_app_dur(p interval)
@@ -619,8 +1017,20 @@ declare
   v_need  int;
   v_state text;
   v_phone boolean;
+  l       public.kiosk_app_loads%rowtype;
+  v_today date := (now() at time zone 'Asia/Manila')::date;
+  v_day8  boolean;   -- 8 AM - 8 PM: SIM / load reminders only then
+  v_left  int;
+  v_long  boolean;
+  v_used  bigint;
+  v_close date;
+  v_prov  text;
+  v_alrt  jsonb;
+  v_txt   text;
+  tx      record;
 begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
+  v_day8 := (v_min >= 8*60 and v_min < 20*60);
 
   for r in select * from public.kiosk_app_devices loop
     v_name := coalesce(nullif(r.name,''), r.device_id);
@@ -673,6 +1083,81 @@ begin
       continue;
     end if;
 
+    -- BUILD-6 SIM + LOAD watch (dates only, so it runs even while the tablet is silent).
+    l := null;
+    select * into l from public.kiosk_app_loads x where x.device_id = r.device_id order by x.load_date desc, x.id desc limit 1;
+    v_prov := coalesce(r.sim_provider, l.provider, r.sim_operator, 'SIM');
+    -- keep only reminders of the current load (+ this month's "no load recorded")
+    v_alrt := (select coalesce(jsonb_object_agg(a.key, a.value), '{}'::jsonb) from jsonb_each(r.sim_alerts) a
+                where (l.id is not null and a.key like '%:' || l.id) or a.key = 'noload:' || to_char(v_today, 'YYYY-MM'));
+    -- optional "I just loaded": no load text within 30 min -> ask for the screenshot
+    if r.load_wait_from is not null and r.load_wait_from < now() - interval '30 minutes' then
+      if l.id is null or l.created_at < r.load_wait_from then
+        perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' - no ' || v_prov || ' text reached the tablet in 30 min after your load.'
+                || case when r.last_seen < r.load_wait_from then ' (The tablet has been offline since '
+                        || to_char(r.last_seen at time zone 'Asia/Manila', 'Mon DD HH12:MI AM') || ' - it cannot check its texts.)' else '' end
+                || ' Please send the screenshot of the load: Tablets page > ' || v_name || ' > SIM > Record load > Upload screenshot.');
+      end if;
+      update public.kiosk_app_devices set load_wait_from = null where device_id = r.device_id;
+    end if;
+    if v_day8 and l.id is not null then
+      -- load expiry: 30 / 7 / 3 days before (long loads) or 3 days before (short loads), and on the day
+      if l.expires_on is not null then
+        v_left := l.expires_on - v_today;
+        v_long := l.expires_on - l.load_date > 60;
+        v_txt := null;
+        if v_left <= 0 and not v_alrt ? ('expd:' || l.id) then
+          v_txt := ' - ' || v_prov || ' load EXPIRED' || case when v_left < 0 then ' on ' || to_char(l.expires_on, 'Mon DD, YYYY') else ' today' end
+                   || '. Please reload. The telco text is recorded by itself; if no text comes you will be asked for the screenshot.';
+          v_alrt := v_alrt || jsonb_build_object('expd:' || l.id, true, 'exp3:' || l.id, true, 'exp7:' || l.id, true, 'exp30:' || l.id, true);
+        elsif v_left between 1 and 3 and not v_alrt ? ('exp3:' || l.id) then
+          v_txt := ' - ' || v_prov || ' load expires in ' || v_left || case when v_left = 1 then ' day' else ' days' end
+                   || ' (' || to_char(l.expires_on, 'Mon DD, YYYY') || '). Reload before then.';
+          v_alrt := v_alrt || jsonb_build_object('exp3:' || l.id, true, 'exp7:' || l.id, true, 'exp30:' || l.id, true);
+        elsif v_long and v_left between 4 and 7 and not v_alrt ? ('exp7:' || l.id) then
+          v_txt := ' - ' || v_prov || ' load expires in ' || v_left || ' days (' || to_char(l.expires_on, 'Mon DD, YYYY') || ').';
+          v_alrt := v_alrt || jsonb_build_object('exp7:' || l.id, true, 'exp30:' || l.id, true);
+        elsif v_long and v_left between 8 and 30 and not v_alrt ? ('exp30:' || l.id) then
+          v_txt := ' - ' || v_prov || ' load expires in ' || v_left || ' days (' || to_char(l.expires_on, 'Mon DD, YYYY') || ').';
+          v_alrt := v_alrt || jsonb_build_object('exp30:' || l.id, true);
+        end if;
+        if v_txt is not null then perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || v_txt); end if;
+      end if;
+      -- 80% of the promo's data used (the tablet's own count since the load day)
+      if l.gb is not null and l.gb > 0 and not v_alrt ? ('data80:' || l.id) then
+        select coalesce(sum(x.bytes), 0) into v_used from public.kiosk_app_data_days x where x.device_id = r.device_id and x.day >= l.load_date;
+        if v_used >= l.gb * 0.8 * 1073741824 then
+          perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' has used about ' || round(v_used / 1073741824.0, 1)
+                  || ' GB of its ' || trim_scale(l.gb) || ' GB ' || v_prov || ' load (80%+). Reload soon.');
+          v_alrt := v_alrt || jsonb_build_object('data80:' || l.id, true);
+        end if;
+      end if;
+      -- number closes after N days without a load (owner: GOMO 365)
+      if r.sim_close_days is not null then
+        v_close := l.load_date + r.sim_close_days;
+        v_left := v_close - v_today;
+        v_txt := null;
+        if v_left <= 7 and not v_alrt ? ('close7:' || l.id) then
+          v_txt := ' - ' || v_prov || ' NUMBER WILL CLOSE ' || case when v_left <= 0 then 'NOW (no load since ' else 'in ' || v_left || ' days (no load since ' end
+                   || to_char(l.load_date, 'Mon DD, YYYY') || '). Load it before ' || to_char(v_close, 'Mon DD, YYYY') || '.';
+          v_alrt := v_alrt || jsonb_build_object('close7:' || l.id, true, 'close30:' || l.id, true);
+        elsif v_left between 8 and 30 and not v_alrt ? ('close30:' || l.id) then
+          v_txt := ' - ' || v_prov || ' number closes in ' || v_left || ' days if not loaded (last load ' || to_char(l.load_date, 'Mon DD, YYYY')
+                   || '). Load it before ' || to_char(v_close, 'Mon DD, YYYY') || '.';
+          v_alrt := v_alrt || jsonb_build_object('close30:' || l.id, true);
+        end if;
+        if v_txt is not null then perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || v_txt); end if;
+      end if;
+    elsif v_day8 and l.id is null and r.sim_provider is not null and not v_alrt ? ('noload:' || to_char(v_today, 'YYYY-MM')) then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' - no load recorded yet for its ' || r.sim_provider
+              || ' SIM, so expiry and closing dates cannot be watched. Send the screenshot of the last load: Tablets page > '
+              || v_name || ' > SIM > Record load.');
+      v_alrt := v_alrt || jsonb_build_object('noload:' || to_char(v_today, 'YYYY-MM'), true);
+    end if;
+    if v_alrt is distinct from r.sim_alerts then
+      update public.kiosk_app_devices set sim_alerts = v_alrt where device_id = r.device_id;
+    end if;
+
     -- OFFLINE: no report for 10 min. Only 6 AM - 10 PM, only while the tablet's own screen schedule
     -- has it awake (plus 15 min after its ON time), and only for a tablet seen in the last 24 h
     -- (a retired tablet is not an alarm). Reminder every 60 min while it stays offline.
@@ -713,6 +1198,37 @@ begin
               || ' Battery ' || coalesce(r.battery::text,'?') || '%.');
       -- keep offline_alerted_at: a tablet whose Wi-Fi keeps dropping gets at most one OFFLINE per hour
       update public.kiosk_app_devices set offline_first_at = null where device_id = r.device_id;
+    end if;
+
+    -- BUILD-6 ON MOBILE DATA 30+ min (yard Wi-Fi down), and back on Wi-Fi. Once each.
+    if r.net_type = 'mobile' and r.net_since < now() - interval '30 minutes' and not r.mobile_alerted then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is on MOBILE DATA for ' || public.kiosk_app_dur(now() - r.net_since)
+              || ' - the yard Wi-Fi may be down. Punches still sync.'
+              || coalesce(' Mobile data used today: ' || (select round(x.bytes / 1048576.0) from public.kiosk_app_data_days x
+                                                           where x.device_id = r.device_id and x.day = v_today) || ' MB.', ''));
+      update public.kiosk_app_devices set mobile_alerted = true where device_id = r.device_id;
+    elsif r.net_type = 'wifi' and r.mobile_alerted then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is back on Wi-Fi.'
+              || coalesce(' It was on mobile data ' || (select public.kiosk_app_dur(c.ended_at - c.started_at) from public.kiosk_app_conn c
+                                                        where c.device_id = r.device_id and c.kind = 'mobile' and c.ended_at is not null
+                                                        order by c.started_at desc limit 1) || '.', ''));
+      update public.kiosk_app_devices set mobile_alerted = false where device_id = r.device_id;
+    end if;
+    -- BUILD-6 MOBILE DATA NOT WORKING (SIM in, data network not validated) for 30 min: load used up / expired?
+    if r.mobile_bad_since is not null and r.mobile_bad_since < now() - interval '30 minutes' and not r.mobile_bad_alerted
+       and coalesce(r.sim_state, 'ready') = 'ready' then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' - mobile data is NOT working for '
+              || public.kiosk_app_dur(now() - r.mobile_bad_since) || ' (' || coalesce(r.sim_provider, r.sim_operator, 'SIM')
+              || '). The load may be used up or expired. If Wi-Fi goes down, punches wait on the tablet.');
+      update public.kiosk_app_devices set mobile_bad_alerted = true where device_id = r.device_id;
+    elsif r.mobile_bad_since is null and r.mobile_bad_alerted and r.mobile_ok is true then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' - mobile data works again.'
+              || case when exists (select 1 from public.kiosk_app_loads x where x.device_id = r.device_id
+                                    and x.created_at > now() - interval '1 day')
+                      then ' Load recorded.'
+                      else ' Looks like it was loaded, but no telco text came. Please send the screenshot of the load: Tablets page > '
+                           || v_name || ' > SIM > Record load.' end);
+      update public.kiosk_app_devices set mobile_bad_alerted = false where device_id = r.device_id;
     end if;
 
     -- WEAK CHARGER: plugged in but the battery is not charging / still dropping for 15 min (bad charger,
@@ -821,12 +1337,42 @@ begin
     update public.kiosk_app_events set notified = true where id = e.id;
   end loop;
 
+  -- BUILD-6 telco texts: load received / expiring / expired / low go to Telegram (at most 5 per tick); others stay on the page
+  v_sent := 0;
+  for tx in select x.id, x.kind, x.body, x.received_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
+                  coalesce(k.sim_provider, k.sim_operator, x.sender) as prov
+             from public.kiosk_app_sms x left join public.kiosk_app_devices k on k.device_id = x.device_id
+            where not x.notified order by x.received_at loop
+    if tx.kind <> 'other' and tx.received_at > now() - interval '2 days' then
+      v_sent := v_sent + 1;
+      exit when v_sent > 5;
+      if tx.kind = 'load' then
+        select * into l from public.kiosk_app_loads x where x.id = tx.load_id;
+        perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - LOAD RECEIVED (' || tx.prov || ' text, '
+                || to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM') || ')'
+                || coalesce(': ' || trim_scale(l.gb) || ' GB', '') || coalesce(', expires ' || to_char(l.expires_on, 'Mon DD, YYYY'), '')
+                || '. Recorded. Text: "' || left(tx.body, 200) || '"');
+      else
+        perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' text ('
+                || case tx.kind when 'expired' then 'EXPIRED' when 'expiring' then 'expiring' else 'data low' end || ', '
+                || to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM') || '): "' || left(tx.body, 200) || '"');
+      end if;
+    end if;
+    update public.kiosk_app_sms set notified = true where id = tx.id;
+  end loop;
+  -- a Wi-Fi password never waits on the server longer than the command itself (30 min)
+  update public.kiosk_app_devices set cmd_arg = null
+   where cmd = 'set_wifi' and cmd_arg is not null and cmd_at < now() - interval '30 minutes';
+
   -- keep the log small (free tier)
   delete from public.kiosk_app_events where at < now() - interval '60 days';
   -- free the 20-tablet cap from UNNAMED ids that never finished setup and stopped a week ago. Named tablets
   -- (Carmen, Mandaue) are never deleted here, so a long shutdown keeps their generator hours and history.
   delete from public.kiosk_app_devices where coalesce(name, '') = '' and last_seen < now() - interval '7 days';
   delete from public.kiosk_app_shots s where not exists (select 1 from public.kiosk_app_devices d where d.device_id = s.device_id);
+  delete from public.kiosk_app_conn where coalesce(ended_at, now()) < now() - interval '60 days';
+  delete from public.kiosk_app_data_days where day < v_today - 400;
+  delete from public.kiosk_app_sms where received_at < now() - interval '180 days' and load_id is null;
 end $$;
 revoke all on function public.kiosk_app_tick() from public, anon, authenticated;
 
@@ -844,3 +1390,11 @@ select count(*) as tablets,                                                     
        (select count(*) from information_schema.columns where table_schema = 'public'
           and table_name = 'kiosk_app_devices' and column_name in ('page_version','page_error','page_error_at','shot_at')) as new_columns  -- expect 4
   from public.kiosk_app_devices;
+-- build-6 check: expect 5 tables, 6 functions, 14 columns
+select (select count(*) from information_schema.tables where table_schema = 'public'
+          and table_name in ('kiosk_app_conn','kiosk_app_data_days','kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots')) as build6_tables,
+       (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
+          and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info')) as build6_functions,
+       (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
+          and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
+                              'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from')) as build6_columns;
