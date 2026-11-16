@@ -47,6 +47,19 @@
   #shot{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;flex-direction:column;align-items:center;justify-content:center;padding:16px;z-index:9}
   #shot img{max-width:100%;max-height:80vh;border-radius:8px;background:#000}
   #shot p{color:#fff;margin:10px 0}
+  /* build-6 sections */
+  .sect{border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+  .sect h3{margin:0 0 6px;font-size:15px;color:var(--navy)}
+  .warnbox{background:#fff4d6;color:#6b4300;border-radius:10px;padding:8px 10px;margin:6px 0;font-size:14px}
+  .badbox{background:#fdecea;color:var(--bad);border-radius:10px;padding:8px 10px;margin:6px 0;font-size:14px}
+  @media (prefers-color-scheme:dark){.warnbox{background:#3a2f12;color:#ffc04d}.badbox{background:#3a1717;color:#ff8a80}}
+  details{margin:6px 0} summary{cursor:pointer;color:var(--navy);font-size:14px;min-height:32px;display:list-item;padding:4px 0}
+  .li{font-size:14px;padding:6px 0;border-bottom:1px dashed var(--line)}
+  .li:last-child{border-bottom:0}
+  #loadBox{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:flex-start;justify-content:center;padding:16px;z-index:8;overflow:auto}
+  #loadBox .card{width:100%;max-width:520px;margin-top:20px}
+  #loadBox label{display:block;font-size:13px;color:var(--mute);margin:10px 0 4px}
+  #loadPrev{max-width:100%;max-height:220px;border-radius:8px;display:none;margin-top:8px}
 </style>
 </head>
 <body>
@@ -64,8 +77,28 @@
   <div id="list"></div>
   <p class="mute" id="foot" style="display:none">Refreshes every 20 seconds (every 3 seconds while a command is waiting). A command reaches the tablet within about 1 minute.</p>
 </main>
+<div id="loadBox">
+  <div class="card">
+    <h3 style="margin:0 0 6px;color:var(--navy)">Record load - <span id="loadName"></span></h3>
+    <p class="mute" style="margin:0">Choose the screenshot of the load in the DITO / GOMO app. It is read on this phone and the boxes are
+      filled for you. Check them, then Save. No screenshot? Just type the details.</p>
+    <label for="loadFile">Screenshot</label>
+    <input id="loadFile" type="file" accept="image/*">
+    <img id="loadPrev" alt="Screenshot of the load">
+    <div id="loadStatus" class="mute" style="margin-top:8px"></div>
+    <label for="lProv">Provider</label><input id="lProv" maxlength="20" placeholder="DITO / GOMO">
+    <label for="lPromo">Promo</label><input id="lPromo" maxlength="60" placeholder="e.g. GO+99">
+    <label for="lGb">Data (GB)</label><input id="lGb" inputmode="decimal" maxlength="8" placeholder="e.g. 25">
+    <label for="lDate">Load date</label><input id="lDate" type="date">
+    <label for="lExp">Expires on (empty if no expiry)</label><input id="lExp" type="date">
+    <div style="height:12px"></div>
+    <div class="btns"><button class="primary" id="loadSave">Save load</button><button id="loadCancel">Cancel</button></div>
+  </div>
+</div>
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
+<script src="load-reader.js?v=2026-11-16a"></script>
 <script>
+const PAGE_VERSION = 'v2026-11-16a';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -73,7 +106,8 @@ let timer = null;
 // A command pressed here, before the server shows it as waiting: {device: {cmd, at}}. Shown busy at once.
 const sending = {};
 const NAMES = { reload: 'Reload page', hard_reload: 'Full reload', update: 'Update app', screen_on: 'Screen on',
-  screenshot: 'Screenshot', screen_off: 'Screen off', open_settings: 'Open settings', restart: 'Restart tablet', schedule: 'Set schedule' };
+  screenshot: 'Screenshot', screen_off: 'Screen off', open_settings: 'Open settings', restart: 'Restart tablet', schedule: 'Set schedule',
+  retry_punches: 'Retry stuck punches', set_wifi: 'Set Wi-Fi' };
 const FAST_MS = 3000, SLOW_MS = 20000;
 function schedule(fast) {
   clearTimeout(timer);
@@ -123,7 +157,7 @@ async function load() {
     }
     document.getElementById('login').style.display = 'none';
     document.getElementById('foot').style.display = '';
-    document.getElementById('stamp').textContent = 'Updated ' + new Date().toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' });
+    document.getElementById('stamp').textContent = 'Updated ' + new Date().toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' }) + ' - ' + PAGE_VERSION;
     render(rows || []);
     schedule(wantFast(rows || []));
   } catch (e) {
@@ -225,7 +259,8 @@ function render(rows) {
         <div class="stat"><b>${phone ? 'Roll-call page version' : 'Kiosk page version'}</b>${t.page_version ? esc(t.page_version) : '<span class="mute">not reported yet</span>'}</div>
         <div class="stat"><b>Last page error</b>${t.page_error ? '<span class="err">' + esc(t.page_error) + '</span><br><span class="mute">' + hhmm(t.page_error_at) + ' (' + ago(t.page_error_at) + ')</span>' : 'none'}</div>
       </div>
-      <div class="mute" style="margin-bottom:10px">Last command: ${last}</div>
+      ${phone ? '' : punchesHtml(t) + netHtml(t) + simHtml(t)}
+      <div class="mute" style="margin:10px 0">Last command: ${last}</div>
       <div class="btns">
         ${cmdBtn(t, 'reload', 'Reload page', '', 'primary')}
         ${cmdBtn(t, 'hard_reload', 'Full reload', 'Full reload clears the old cached kiosk version (punches are kept). Continue?')}
@@ -236,6 +271,7 @@ function render(rows) {
         ${cmdBtn(t, 'screen_off', 'Screen off', 'Turn the screen off now?')}
         ${cmdBtn(t, 'schedule', 'Set schedule', '', '', 'data-on="' + esc(t.sched_on || '05:30') + '" data-off="' + esc(t.sched_off || '22:30') + '"')}
         <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
+        ${cmdBtn(t, 'set_wifi', 'Set Wi-Fi')}
         ${cmdBtn(t, 'open_settings', 'Open settings', 'Open the settings screen on the tablet (no passcode needed for 10 minutes)?')}
         ${cmdBtn(t, 'restart', 'Restart tablet', 'Restart the tablet now? Workers cannot punch for about 1 minute.', 'danger')}
         <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
@@ -244,6 +280,207 @@ function render(rows) {
     </div>`;
   }).join('');
 }
+
+// ---- build-6 sections ------------------------------------------------------------------------------
+// <details> stay open across the 20-second refresh
+const openDet = {};
+document.addEventListener('toggle', e => { const k = e.target.dataset && e.target.dataset.k; if (k) openDet[k] = e.target.open; }, true);
+const det = (k, title, body) => `<details data-k="${esc(k)}"${openDet[k] ? ' open' : ''}><summary>${title}</summary>${body}</details>`;
+const mins = m => m == null ? '-' : m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min';
+const dmy = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
+
+function punchesHtml(t) {
+  const p = t.punches;
+  if (!p) return `<div class="sect"><h3>Punches on this tablet</h3><div class="mute">Not reported yet (the kiosk page reports every few minutes).</div></div>`;
+  const q = +p.queue || 0, oq = +p.offline_queue || 0, st = +p.stuck || 0, list = Array.isArray(p.stuck_details) ? p.stuck_details : [];
+  const items = list.map(x => `<div class="li"><b>${esc(x.name)}</b> <span class="mute">${esc(x.code || '')} - ${esc(x.date)}</span><br>${esc(x.times)}<br><span class="err">${esc(x.reason)}</span></div>`).join('');
+  return `<div class="sect"><h3>Punches on this tablet</h3>
+    <div>${q + oq === 0 ? 'All synced' : '<b>' + (q + oq) + '</b> waiting to sync' + (oq ? ' (' + oq + ' from offline PINs)' : '')}
+      ${p.oldest_unsynced_at ? '<span class="mute"> - oldest since ' + esc(hhmm(p.oldest_unsynced_at)) + '</span>' : ''}</div>
+    ${st ? `<div class="badbox"><b>${st}</b> stuck (refused by the server) - they will NOT sync by themselves.</div>` + det(t.device_id + '|stuck', 'Show the stuck punches', items) : ''}
+    <div class="mute">Reported ${esc(ago(p.reported_at))}</div>
+    ${st || q + oq ? '<div style="margin-top:8px">' + cmdBtn(t, 'retry_punches', 'Retry stuck punches', 'Give the stuck punches a fresh try and push the waiting ones now? Never while a worker is punching.') + '</div>' : ''}
+  </div>`;
+}
+
+function netHtml(t) {
+  const n = t.net || {};
+  const now = n.type === 'wifi' ? 'Wi-Fi' : n.type === 'mobile' ? '<span style="color:var(--warn)">MOBILE DATA</span>' : n.type === 'none' ? '<span style="color:var(--bad)">No connection</span>' : '-';
+  const per = (n.periods || []).map(x => {
+    const to = x.to ? new Date(x.to) : new Date(), len = Math.round((to - new Date(x.from)) / 60000);
+    return `<div class="li">${x.kind === 'mobile' ? 'On mobile data' : x.kind === 'offline' ? 'Offline' : 'No connection'} - <b>${mins(len)}</b>
+      <br><span class="mute">${esc(hhmm(x.from))} to ${x.to ? esc(hhmm(x.to)) : 'now'}${x.reason ? ' - ' + esc(x.reason) : ''}</span></div>`;
+  }).join('');
+  return `<div class="sect"><h3>Connection</h3>
+    <div>Now: <b>${now}</b>${n.since ? '<span class="mute"> since ' + esc(hhmm(n.since)) + '</span>' : ''}${n.mobile_signal != null ? '<span class="mute"> - mobile signal ' + esc(n.mobile_signal) + '/4</span>' : ''}</div>
+    <div>Wi-Fi down (mobile data or offline): today <b>${mins(n.down_today_min)}</b>, last 7 days <b>${mins(n.down_7d_min)}</b></div>
+    ${n.mobile_ok === false ? '<div class="warnbox">Mobile data is NOT working on this SIM (load used up or expired?).</div>' : ''}
+    ${t.battery_unrestricted === false ? '<div class="warnbox">Battery setting is not "Unrestricted" for RSR Kiosk: at night the tablet may not check in. On the tablet: Settings &gt; Apps &gt; RSR Kiosk &gt; Battery &gt; Unrestricted.</div>' : ''}
+    ${per ? det(t.device_id + '|net', 'Wi-Fi downtime list (last 15)', per) : '<div class="mute">No downtime recorded.</div>'}
+  </div>`;
+}
+
+function simHtml(t) {
+  const s = t.sim || {}, l = s.load, id = esc(t.device_id);
+  if (!s.provider && !l && (!s.state || s.state === 'absent')) {
+    return `<div class="sect"><h3>SIM</h3><div class="mute">${s.state === 'absent' ? 'No SIM in this tablet.' : 'No SIM info yet (needs app build with SIM reporting).'}</div>
+      <div class="btns" style="margin-top:8px"><button onclick="askSim('${id}','','')">SIM settings</button></div></div>`;
+  }
+  const prov = esc(s.provider || (l && l.provider) || s.operator || 'SIM');
+  let load = '<div class="warnbox">No load recorded yet - expiry and closing dates cannot be watched. Tap Record load.</div>';
+  if (l) {
+    const left = l.days_left, pct = l.gb ? Math.round((l.used_mb || 0) / (l.gb * 1024) * 100) : null;
+    load = `<div>Last load: <b>${esc(dmy(l.load_date))}</b>${l.promo ? ' - ' + esc(l.promo) : ''} <span class="mute">(${esc(l.source === 'text' ? 'from telco text' : l.source === 'screenshot' ? 'from screenshot' : 'typed')})</span></div>
+      <div>Data used since: <b>${l.used_mb != null ? (l.used_mb >= 1024 ? (l.used_mb / 1024).toFixed(1) + ' GB' : esc(l.used_mb) + ' MB') : '-'}</b>${l.gb ? ' of ' + esc(l.gb) + ' GB' + (pct != null ? ' (' + pct + '%)' : '') : ''}</div>
+      <div>Expires: ${l.expires_on ? '<b style="color:' + (left <= 0 ? 'var(--bad)' : left <= 7 ? 'var(--warn)' : 'inherit') + '">' + esc(dmy(l.expires_on)) + '</b> <span class="mute">(' + (left <= 0 ? 'EXPIRED - needs reload' : left + ' days left') + ')</span>' : '<span class="mute">no expiry recorded</span>'}</div>`;
+  }
+  const close = s.closes_on ? `<div>Number closes if no load by: <b>${esc(dmy(s.closes_on))}</b> <span class="mute">(${esc(s.close_days)} days without load)</span></div>` : '';
+  const texts = (s.texts || []).map(x => `<div class="li"><b>${esc(x.from)}</b> <span class="mute">${esc(hhmm(x.at))} - ${esc(x.kind)}</span><br>${esc(x.body)}</div>`).join('');
+  return `<div class="sect"><h3>SIM - ${prov}</h3>
+    ${load}${close}
+    <div class="mute">SIM ${esc(s.state || '?')}${s.operator ? ' (' + esc(s.operator) + ')' : ''} - data today ${s.data_today_mb != null ? esc(s.data_today_mb) + ' MB' : '-'}
+      - telco texts ${s.sms_ok === true ? 'read by the app' : s.sms_ok === false ? '<span style="color:var(--warn)">NOT allowed on this tablet (use screenshots)</span>' : '?'}</div>
+    ${s.load_wait_from ? '<div class="mute">Waiting for the telco text after your load (since ' + esc(hhmm(s.load_wait_from)) + ')...</div>' : ''}
+    ${texts ? det(t.device_id + '|sms', 'Latest telco texts', texts) : ''}
+    <div class="btns" style="margin-top:8px">
+      <button class="primary" onclick="openLoad('${id}')">Record load</button>
+      <button onclick="loadWait('${id}')">I just loaded</button>
+      ${l && l.has_shot ? `<button onclick="viewProof('${id}')">View load screenshot</button>` : ''}
+      <button onclick="askSim('${id}','${esc(s.provider || '')}','${esc(s.close_days || '')}')">SIM settings</button>
+    </div>
+  </div>`;
+}
+
+function askWifi(device) {
+  const ssid = prompt('Set Wi-Fi on this tablet.\n\nWi-Fi NAME (exactly as on the router):');
+  if (ssid == null || !ssid.trim()) return;
+  const pass = prompt('Wi-Fi PASSWORD for "' + ssid.trim() + '" (8 or more characters; leave empty for an open Wi-Fi).\nIt is removed from the server as soon as the tablet has it.');
+  if (pass == null) return;
+  const sw = confirm('Switch to "' + ssid.trim() + '" NOW?\n\nOK = switch now (the tablet is offline a few seconds; punches are kept).\nCancel = only save it; the tablet uses it when the current Wi-Fi is gone.');
+  send(device, 'set_wifi', JSON.stringify({ ssid: ssid.trim(), pass: pass, switch: sw }));
+}
+
+function askSim(device, prov, days) {
+  const p = prompt('SIM provider of this tablet (e.g. DITO or GOMO). Empty = no SIM.', prov || '');
+  if (p == null) return;
+  const d = prompt('The number CLOSES after how many days without a load?\n(GOMO: 365 - filled in by itself when empty.) Leave empty if not known.', days || '');
+  if (d == null) return;
+  if (d.trim() && !/^\d{2,4}$/.test(d.trim())) { show('Days must be a number like 365.', 'err'); return; }
+  rpc('kiosk_app_sim_set', { p_passcode: passcode, p_device: device, p_provider: p.trim(), p_close_days: d.trim() ? +d.trim() : null })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show('SIM settings saved.', 'ok'); load(); } })
+    .catch(e => show('Not saved: ' + e.message, 'err'));
+}
+
+function loadWait(device) {
+  if (!confirm('You just loaded this SIM in the DITO / GOMO app?\n\nThe tablet watches for the telco text. If none comes in 30 minutes, you get a Telegram asking for the screenshot.')) return;
+  rpc('kiosk_app_load_wait', { p_passcode: passcode, p_device: device })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show('OK - waiting for the telco text (30 min).', 'ok'); load(); } })
+    .catch(e => show('Not sent: ' + e.message, 'err'));
+}
+
+async function viewProof(device) {
+  try {
+    const r = await rpc('kiosk_app_load_shot_get', { p_passcode: passcode, p_device: device });
+    if (!r || r.error) { show((r && r.error) || 'No screenshot', 'err'); return; }
+    if (!/^\/9j\/[A-Za-z0-9+/]+=*$/.test(r.jpeg || '')) { show('The screenshot is damaged.', 'err'); return; }
+    document.getElementById('shotImg').src = 'data:image/jpeg;base64,' + r.jpeg;
+    document.getElementById('shotCap').textContent = 'Screenshot of the last load';
+    document.getElementById('shot').style.display = 'flex';
+  } catch (e) { show('Cannot load the screenshot: ' + e.message, 'err'); }
+}
+
+// ---- Record load (screenshot reader) ---------------------------------------------------------
+let loadDev = null, loadShot = '', readSeq = 0;
+const manilaToday = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
+const $ = id => document.getElementById(id);
+function openLoad(device) {
+  const t = lastRows.find(x => x.device_id === device) || {}, s = t.sim || {};
+  loadDev = device; loadShot = ''; readSeq++;
+  $('loadName').textContent = t.name || device;
+  $('loadFile').value = ''; $('loadPrev').style.display = 'none'; $('loadPrev').removeAttribute('src');
+  $('lProv').value = s.provider || s.operator || ''; $('lPromo').value = ''; $('lGb').value = '';
+  $('lDate').value = manilaToday(); $('lExp').value = '';
+  $('loadStatus').textContent = '';
+  $('loadBox').style.display = 'flex';
+}
+function closeLoad() { $('loadBox').style.display = 'none'; loadDev = null; loadShot = ''; readSeq++; }
+$('loadCancel').onclick = closeLoad;
+
+// picture -> small JPEG (proof, under ~650 KB) on a canvas
+function toJpeg(file) {
+  return new Promise((ok, bad) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let w = img.naturalWidth, h = img.naturalHeight, max = 1400, q = 0.8, b64 = '';
+      for (let k = 0; k < 6; k++) {
+        const sc = Math.min(1, max / Math.max(w, h));
+        const c = document.createElement('canvas'); c.width = Math.round(w * sc); c.height = Math.round(h * sc);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        b64 = c.toDataURL('image/jpeg', q).split(',')[1] || '';
+        if (b64.length < 880000) return ok({ b64, canvas: c });
+        max = Math.round(max * 0.8); q = Math.max(0.5, q - 0.1);
+      }
+      bad(new Error('picture too big'));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); bad(new Error('not a picture')); };
+    img.src = url;
+  });
+}
+let tessP = null;
+function tesseract() {
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (!tessP) tessP = new Promise((ok, bad) => {
+    const sc = document.createElement('script');
+    sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    sc.onload = () => window.Tesseract ? ok(window.Tesseract) : bad(new Error('reader not loaded'));
+    sc.onerror = () => { tessP = null; bad(new Error('reader not loaded (internet?)')); };
+    document.head.appendChild(sc);
+  });
+  return tessP;
+}
+$('loadFile').onchange = async () => {
+  const f = $('loadFile').files[0], my = ++readSeq;
+  if (!f) return;
+  $('loadStatus').textContent = 'Preparing the picture...';
+  try {
+    const { b64, canvas } = await toJpeg(f);
+    if (my !== readSeq) return;
+    loadShot = b64;
+    $('loadPrev').src = 'data:image/jpeg;base64,' + b64; $('loadPrev').style.display = 'block';
+    $('loadStatus').textContent = 'Reading the screenshot... (the first time takes about 20-40 seconds)';
+    const T = await tesseract();
+    const res = await T.recognize(canvas, 'eng');
+    if (my !== readSeq) return;
+    const t = lastRows.find(x => x.device_id === loadDev) || {};
+    const r = window.RSRLoadReader.parse((res && res.data && res.data.text) || '', manilaToday(), (t.sim && t.sim.provider) || $('lProv').value);
+    if (r.provider) $('lProv').value = r.provider;
+    if (r.promo) $('lPromo').value = r.promo;
+    if (r.gb != null) $('lGb').value = r.gb;
+    if (r.load_date) $('lDate').value = r.load_date;
+    if (r.expires_on) $('lExp').value = r.expires_on;
+    const missing = [r.gb == null && 'data (GB)', !r.expires_on && 'expiry'].filter(Boolean);
+    $('loadStatus').textContent = 'Read. Check the boxes, then tap Save load.' + (missing.length ? ' Not found: ' + missing.join(', ') + ' - type it if you know it.' : '');
+  } catch (e) {
+    if (my !== readSeq) return;
+    $('loadStatus').textContent = 'Could not read it (' + e.message + '). Type the details, then Save load' + (loadShot ? ' (the screenshot is still kept as proof).' : '.');
+  }
+};
+$('loadSave').onclick = async () => {
+  if (!loadDev) return;
+  const gb = $('lGb').value.trim().replace(',', '.');
+  if (gb && !/^\d{1,5}(\.\d{1,2})?$/.test(gb)) { $('loadStatus').textContent = 'Data must be a number like 25 or 1.5'; return; }
+  if (!$('lDate').value) { $('loadStatus').textContent = 'Enter the load date.'; return; }
+  $('loadSave').disabled = true;
+  try {
+    const r = await rpc('kiosk_app_load_add', { p_passcode: passcode, p_device: loadDev, p_load: {
+      provider: $('lProv').value.trim(), promo: $('lPromo').value.trim(), gb: gb, load_date: $('lDate').value,
+      expires_on: $('lExp').value, source: loadShot ? 'screenshot' : 'typed', shot: loadShot } });
+    if (r && r.error) { $('loadStatus').textContent = r.error; if (r.error === 'wrong passcode') { closeLoad(); logout('wrong passcode'); } return; }
+    closeLoad(); show('Load saved. Expiry and closing reminders now follow this load.', 'ok'); load();
+  } catch (e) { $('loadStatus').textContent = 'Not saved: ' + e.message; }
+  finally { $('loadSave').disabled = false; }
+};
 
 let lastRows = [];
 async function send(device, cmd, arg, confirmText) {
@@ -277,6 +514,7 @@ document.getElementById('list').addEventListener('click', e => {
   if (!btn || btn.disabled) return;
   const d = btn.dataset;
   if (d.cmd === 'schedule') askSchedule(d.dev, d.on, d.off);
+  else if (d.cmd === 'set_wifi') askWifi(d.dev);
   else send(d.dev, d.cmd, '', d.confirm || '');
 });
 

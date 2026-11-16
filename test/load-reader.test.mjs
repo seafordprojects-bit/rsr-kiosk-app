@@ -1,0 +1,31 @@
+// Test for load-reader.js (Tablets page "Record load > Upload screenshot"): reads promo, GB, load date and
+// expiry out of the text found in a DITO / GOMO app screenshot. Run: node test/load-reader.test.mjs
+import fs from 'fs'; import vm from 'vm';
+const g = {}; vm.runInNewContext(fs.readFileSync(new URL('../load-reader.js', import.meta.url), 'utf8'), g);
+const P = g.RSRLoadReader.parse;
+let fails = 0; const ok = (c, m) => { console.log((c ? 'PASS ' : 'FAIL ') + m); if (!c) fails++; };
+const T = '2026-11-16';
+let r = P('DITO\nUnli 5G Data 365\n10 GB\nValid until Nov 16, 2027\nPurchased on Nov 16, 2026', T, '');
+ok(r.provider === 'DITO' && r.gb === 10 && r.expires_on === '2027-11-16' && r.load_date === '2026-11-16', 'DITO 365: provider, GB, valid until, purchased on');
+ok(/Unli 5G Data 365/.test(r.promo), 'DITO promo line: ' + r.promo);
+r = P('GOMO\nGO+99\n25GB + 5GB bonus\nExpires on 12/16/2026', T, '');
+ok(r.provider === 'GOMO' && r.gb === 25 && r.expires_on === '2026-12-16' && r.load_date === T, 'GOMO: biggest single GB amount, MM/DD expiry, load date = today');
+r = P('Your promo\n500 MB\nvalid for 7 days', T, 'GOMO');
+ok(Math.abs(r.gb - 0.49) < 0.01 && r.expires_on === '2026-11-23' && r.provider === 'GOMO', 'MB as GB, 7 days from today, provider from the tablet');
+r = P('Expiry: 16 Dec 2026\n2.5 GB', T, '');
+ok(r.expires_on === '2026-12-16' && r.gb === 2.5, '16 Dec 2026 + decimal GB');
+r = P('Valid until 2026-12-31', T, '');
+ok(r.expires_on === '2026-12-31', 'ISO date');
+r = P('valid until Feb 30, 2027', T, '');
+ok(r.expires_on === '', 'impossible date left empty');
+r = P('valid until Jan 5, 2020', T, '');
+ok(r.expires_on === '', 'date before the load day left empty');
+r = P('', T, 'DITO');
+ok(r.provider === 'DITO' && r.gb === null && r.expires_on === '' && r.load_date === T, 'nothing read: provider from tablet, today, rest empty');
+r = P('Expires Nov 16 2027', T, '');
+ok(r.expires_on === '2027-11-16', 'date without comma');
+r = P('Transaction date: Nov 10, 2026\nValid until: Dec 10, 2026', T, '');
+ok(r.load_date === '2026-11-10' && r.expires_on === '2026-12-10', 'transaction date = load date');
+r = P('Purchased on Dec 01, 2026', T, '');
+ok(r.load_date === T, 'load date in the future refused (today kept)');
+console.log(fails ? fails + ' FAILED' : 'ALL PASS'); process.exit(fails ? 1 : 0);
