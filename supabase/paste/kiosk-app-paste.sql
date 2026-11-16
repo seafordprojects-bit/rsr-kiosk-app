@@ -1142,9 +1142,7 @@ begin
     if e.event like 'tablet restarted%' or e.event like 'updated to build%'
        or e.event like 'maintenance opened%' or e.event like 'update install failed%'
        or e.event like 'installing build%' or e.event = 'screen on failed'
-       or (e.event = 'screen woken by phone call'
-           and not exists (select 1 from public.kiosk_app_events e3 where e3.device_id = e.device_id and e3.event = e.event
-                             and e3.notified and e3.at > now() - interval '10 minutes')) then
+       or e.event = 'screen woken by phone call' then
       v_sent := v_sent + 1;
       exit when v_sent > 5;
       perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - '

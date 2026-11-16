@@ -1387,9 +1387,7 @@ begin
     if e.event like 'tablet restarted%' or e.event like 'updated to build%'
        or e.event like 'maintenance opened%' or e.event like 'update install failed%'
        or e.event like 'installing build%' or e.event = 'screen on failed'
-       or (e.event = 'screen woken by phone call'   -- one per 10 min (spam calls)
-           and not exists (select 1 from public.kiosk_app_events e3 where e3.device_id = e.device_id and e3.event = e.event
-                             and e3.notified and e3.at > now() - interval '10 minutes')) then
+       or e.event = 'screen woken by phone call' then   -- every call (owner 2026-11-16: new SIMs, no spam expected)
       v_sent := v_sent + 1;
       exit when v_sent > 5;                       -- at most 5 event messages per 5-minute tick
       perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - '
