@@ -588,12 +588,15 @@ declare
 begin
   update public.kiosk_app_sms x set notified = true where x.id = p_id and not x.notified;
   if not found then return false; end if;
-  select x.id, x.kind, x.body, x.received_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
+  select x.id, x.kind, x.body, x.received_at, x.created_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
          coalesce(k.sim_provider, k.sim_operator, x.sender) as prov
     into tx
     from public.kiosk_app_sms x left join public.kiosk_app_devices k on k.device_id = x.device_id
    where x.id = p_id;
   if tx.kind = 'other' or tx.received_at < now() - interval '2 days' then return false; end if;
+  if tx.kind = 'otp' and (tx.received_at < now() - interval '15 minutes' or tx.created_at < now() - interval '15 minutes') then
+    return false;
+  end if;
   v_t := to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM');
   if tx.kind = 'otp' then
     perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' CODE: '
@@ -650,7 +653,10 @@ begin
     returning id into v_load;
     update public.kiosk_app_sms x set load_id = v_load where x.id = v_id;
   end if;
-  perform public.kiosk_app_sms_alert(v_id);
+  begin
+    perform public.kiosk_app_sms_alert(v_id);
+  exception when others then null;
+  end;
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.kiosk_app_sms_put(text, text, text, text, text) from public;
@@ -1234,7 +1240,8 @@ select count(*) as tablets,
 select (select count(*) from information_schema.tables where table_schema = 'public'
           and table_name in ('kiosk_app_conn','kiosk_app_data_days','kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots')) as build6_tables,
        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
-          and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info')) as build6_functions,
+          and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info',
+                          'kiosk_app_sms_alert','kiosk_app_otp_code')) as build6_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
                               'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;

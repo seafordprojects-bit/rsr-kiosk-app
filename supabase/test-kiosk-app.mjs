@@ -484,6 +484,12 @@ await q(`insert into kiosk_app_sms (device_id, sender, body, received_at, kind) 
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('Only 100MB')).length===1,'leftover text sent by the tick, once');
 ok((await q(`select public.kiosk_app_sms_alert(id) r from kiosk_app_sms where body like '%Only 100MB%'`))[0].r===false,'alert on an already-sent text does nothing');
+// a broken Telegram sender never loses a text: the put still saves it, the tick sends it later
+await q(`alter function public.kiosk_alert_send(text) rename to kiosk_alert_send_x`);
+ok((await sms('GOMO','Your data is running low. Only 7MB left.')).ok===true && (await q(`select notified from kiosk_app_sms where body like '%Only 7MB%'`))[0].notified===false,'Telegram broken: text still saved, left for the tick');
+await q(`alter function public.kiosk_alert_send_x(text) rename to kiosk_alert_send`);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('Only 7MB')).length===1,'tick sends it once Telegram works again');
 // OTP for the telco app: Telegram AT ONCE (owner 2026-11-16), on the Tablets page 15 min, never a load, then deleted
 await q(`delete from sent`);
 await sms('DITO','Your DITO OTP is 482913. Do not share this code with anyone.');
@@ -507,7 +513,9 @@ ok(SI.otp && SI.otp.code==='771204','the code next to "code is" is shown, not th
 await sms('DITO','551177 is your DITO one-time PIN.');
 ok((await q(`select kind from kiosk_app_sms where body like '551177%'`))[0].kind==='otp','"551177 is your ... PIN" is a code');
 // a code that reached the server late (tablet was offline) still shows 15 min from when it arrived
-await sms('DITO','Your OTP is 909090.', new Date(Date.now()-40*60000).toISOString());
+await q(`delete from sent`);
+await sms('DITO','Your OTP is 909090.', new Date(Date.now()-40*60000).toISOString().replace(/\.\d+Z$/,'Z'));   // the app's format: no milliseconds
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('909090')),'late code (40 min old) never sent to Telegram as "use it now"');
 SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
 ok(SI.otp && SI.otp.code==='909090','late code still shown (15 min from server receive time)');
 await q(`delete from kiosk_app_sms where kind='otp' or body like '%Level-Up 99%' or body like '%Never share your PIN%'`);

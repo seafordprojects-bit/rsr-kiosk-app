@@ -229,8 +229,8 @@ revoke all on function public.kiosk_app_ts(text) from public, anon, authenticate
 create or replace function public.kiosk_app_sms_kind(p_body text)
 returns text language sql immutable as $$
   select case
-    -- a one-time code (OTP) for the telco app: shown on the Tablets page for 15 minutes only, never on Telegram,
-    -- never kept (owner 2026-11-16: the SIM sits in the kiosk, the code is needed to sign in to the DITO / GOMO app)
+    -- a one-time code (OTP) for the telco app: sent to Telegram at once and shown on the Tablets page for 15 minutes,
+    -- then deleted (owner 2026-11-16: the SIM sits in the kiosk, the code is needed to sign in to the DITO / GOMO app)
     -- the number must sit right next to the code words ("OTP is 482913", "482913 is your code"); a load or expiry text
     -- that only ends with "never share your OTP" is NOT a code (review 2026-11-16)
     when (p_body ~* '(otp|one-?time (pin|password|code)|verification code|security code|\mcode|\mpin)[^0-9]{0,25}\m[0-9]{4,8}\M'
@@ -732,12 +732,16 @@ declare
 begin
   update public.kiosk_app_sms x set notified = true where x.id = p_id and not x.notified;
   if not found then return false; end if;   -- already sent (or being sent) by someone else
-  select x.id, x.kind, x.body, x.received_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
+  select x.id, x.kind, x.body, x.received_at, x.created_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
          coalesce(k.sim_provider, k.sim_operator, x.sender) as prov
     into tx
     from public.kiosk_app_sms x left join public.kiosk_app_devices k on k.device_id = x.device_id
    where x.id = p_id;
   if tx.kind = 'other' or tx.received_at < now() - interval '2 days' then return false; end if;
+  -- a code that arrived late (tablet was offline) or was left unsent is useless: never sent as "use it now"
+  if tx.kind = 'otp' and (tx.received_at < now() - interval '15 minutes' or tx.created_at < now() - interval '15 minutes') then
+    return false;
+  end if;
   v_t := to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM');
   if tx.kind = 'otp' then
     perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' CODE: '
@@ -802,8 +806,12 @@ begin
     returning id into v_load;
     update public.kiosk_app_sms x set load_id = v_load where x.id = v_id;
   end if;
-  -- Telegram at once (load / expiry / low / OTP); the send is queued by pg_net and never fails this call
-  perform public.kiosk_app_sms_alert(v_id);
+  -- Telegram at once (load / expiry / low / OTP). A failure here never loses the text: it is undone to this
+  -- point (notified stays false) and the 5-min tick sends it.
+  begin
+    perform public.kiosk_app_sms_alert(v_id);
+  exception when others then null;
+  end;
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.kiosk_app_sms_put(text, text, text, text, text) from public;
@@ -1496,11 +1504,12 @@ select count(*) as tablets,                                                     
        (select count(*) from information_schema.columns where table_schema = 'public'
           and table_name = 'kiosk_app_devices' and column_name in ('page_version','page_error','page_error_at','shot_at')) as new_columns  -- expect 4
   from public.kiosk_app_devices;
--- build-6 check: expect 5 tables, 6 functions, 15 columns
+-- build-6 check: expect 5 tables, 8 functions, 15 columns
 select (select count(*) from information_schema.tables where table_schema = 'public'
           and table_name in ('kiosk_app_conn','kiosk_app_data_days','kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots')) as build6_tables,
        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
-          and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info')) as build6_functions,
+          and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info',
+                          'kiosk_app_sms_alert','kiosk_app_otp_code')) as build6_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
                               'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;
