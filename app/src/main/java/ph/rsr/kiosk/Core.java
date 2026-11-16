@@ -288,6 +288,17 @@ final class Core {
      * 45 s in case the Wi-Fi is still waking up from sleep. The app's foreground service keeps the network allowed in
      * deep sleep. A few texts a month: no real battery cost. The hourly check-in is not changed.
      */
+    private Handler textH;
+
+    private synchronized Handler textHandler() {
+        if (textH == null) {
+            HandlerThread t = new HandlerThread("rsr-texts");
+            t.start();
+            textH = new Handler(t.getLooper());
+        }
+        return textH;
+    }
+
     void textArrived() {
         final PowerManager.WakeLock wl;
         try {
@@ -299,10 +310,12 @@ final class Core {
             sendTextsSoon();
             return;
         }
-        bg.post(this::sendTexts);
-        bg.postDelayed(this::sendTexts, 10_000);
-        bg.postDelayed(this::sendTexts, 25_000);
-        bg.postDelayed(() -> {
+        // own thread: the main background thread may be busy (waiting for a quiet moment, an update check)
+        Handler tx = textHandler();
+        tx.post(this::sendTexts);
+        tx.postDelayed(this::sendTexts, 10_000);
+        tx.postDelayed(this::sendTexts, 25_000);
+        tx.postDelayed(() -> {
             sendTexts();
             try { if (wl.isHeld()) wl.release(); } catch (Exception ignored) { }
         }, 45_000);

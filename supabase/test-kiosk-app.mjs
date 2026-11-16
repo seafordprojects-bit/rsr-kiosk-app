@@ -485,8 +485,24 @@ await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('482913')),'OTP never sent to Telegram');
 let SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
 ok(SI.otp && SI.otp.code==='482913' && !SI.texts.some(x=>x.body.includes('482913')),'OTP shown on its own on the SIM card');
-await q(`update kiosk_app_sms set received_at=now()-interval '16 minutes' where body like '%482913%'`); await q(`select public.kiosk_app_tick()`);
+await q(`update kiosk_app_sms set created_at=now()-interval '16 minutes' where body like '%482913%'`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select count(*)::int n from kiosk_app_sms where body like '%482913%'`))[0].n===0 && (await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r.otp===null,'OTP deleted after 15 min');
+// a load / expiry text ending with "never share your OTP" is NOT a code (review 2026-11-16)
+await sms('DITO','You have successfully registered to Level-Up 99, 25GB valid until 11/20/2026. DITO will never ask for your OTP.');
+ok((await q(`select kind from kiosk_app_sms where body like '%Level-Up 99%'`))[0].kind==='load','load text with an OTP warning stays a load');
+await sms('GOMO','Your promo will expire on 12/20/2026. Never share your PIN with anyone.');
+ok((await q(`select kind from kiosk_app_sms where body like '%Never share your PIN%'`))[0].kind==='expiring','expiry text with a PIN warning stays expiring');
+await sms('GOMO','On 11/16/2026 your verification code is 771204. Do not share.');
+SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
+ok(SI.otp && SI.otp.code==='771204','the code next to "code is" is shown, not the date');
+await sms('DITO','551177 is your DITO one-time PIN.');
+ok((await q(`select kind from kiosk_app_sms where body like '551177%'`))[0].kind==='otp','"551177 is your ... PIN" is a code');
+// a code that reached the server late (tablet was offline) still shows 15 min from when it arrived
+await sms('DITO','Your OTP is 909090.', new Date(Date.now()-40*60000).toISOString());
+SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
+ok(SI.otp && SI.otp.code==='909090','late code still shown (15 min from server receive time)');
+await q(`delete from kiosk_app_sms where kind='otp' or body like '%Level-Up 99%' or body like '%Never share your PIN%'`);
+await q(`delete from kiosk_app_loads where device_id=$1 and created_at > now() - interval '1 minute' and gb=25 and expires_on='2026-11-20'`,[B6]);
 // parser edge cases
 const P=async (b)=>(await q(`select public.kiosk_app_parse_load($1,'2026-11-16') r`,[b]))[0].r;
 ok((await P('Bad date 02/30/2027 until')).expires_on===null,'impossible date never breaks parsing');
@@ -591,6 +607,9 @@ ok((await q(`select msg from sent`)).some(x=>x.msg.includes('screen did NOT turn
 await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen woken by phone call'});
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('screen woken by your phone call')).length===1,'call wake confirmed on Telegram once');
+await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen woken by phone call'});
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('phone call')),'second call within 10 min: no second Telegram');
 // downtime: an outage reported for time already on mobile data is counted once
 await q(`delete from kiosk_app_conn where device_id=$1`,[B6]);
 await q(`insert into kiosk_app_conn(device_id,kind,started_at,ended_at) values ($1,'mobile',now()-interval '3 hours',now()-interval '10 minutes'),($1,'offline',now()-interval '2 hours 10 minutes',now()-interval '10 minutes')`,[B6]);

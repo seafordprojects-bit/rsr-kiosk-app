@@ -123,6 +123,7 @@ create table if not exists public.kiosk_app_sms (
   load_id      bigint
 );
 create index if not exists kiosk_app_sms_dev on public.kiosk_app_sms (device_id, received_at desc);
+alter table public.kiosk_app_sms add column if not exists created_at timestamptz not null default now();
 revoke all on public.kiosk_app_sms from public, anon, authenticated;
 alter table public.kiosk_app_sms enable row level security;
 create table if not exists public.kiosk_app_loads (
@@ -161,8 +162,9 @@ revoke all on function public.kiosk_app_ts(text) from public, anon, authenticate
 create or replace function public.kiosk_app_sms_kind(p_body text)
 returns text language sql immutable as $$
   select case
-    when p_body ~* '(\motp\M|one-?time (pin|password|code)|verification code|security code|\mcode is\M|\mpin is\M|do not share)'
-         and p_body ~ '[0-9]{4,8}' then 'otp'
+    when (p_body ~* '(otp|one-?time (pin|password|code)|verification code|security code|\mcode|\mpin)[^0-9]{0,25}\m[0-9]{4,8}\M'
+          or p_body ~* '\m[0-9]{4,8}\M[^0-9]{0,6}(is|as) your[^0-9.]{0,20}(otp|code|pin)')
+         and p_body !~* '(successfully|registered|subscribed|purchased|reloaded|valid until|valid till|expire|expiring|\mgb\M|\mmb\M)' then 'otp'
     when p_body ~* '(\mfree\M|freebie|\mbonus\M|\mgift|pasaload|share-?a-?load|from (\+?63|0)9[0-9]|\mdial\M|\*[0-9]{2,4}#|register now|avail now|\mget [0-9]+\s*gb|\mbuy now|\moffer\M|limited time|until supplies)' then 'other'
     when p_body ~* '\myour\M[^.]{0,80}(has expired|have expired|is expired|already expired|expired na|nag-?expire na)' then 'expired'
     when p_body ~* '(you have (successfully )?(registered|subscribed|purchased|bought|loaded|reloaded)|successfully (registered|subscribed|purchased|loaded|reloaded)|registration .*successful|you are now (registered|subscribed)|thank you for (loading|reloading|purchasing|subscribing|registering))'
@@ -441,10 +443,11 @@ begin
                                         order by x.received_at desc), '[]'::jsonb)
                 from (select * from public.kiosk_app_sms y where y.device_id = p_device and y.kind <> 'otp'
                        order by y.received_at desc limit 5) x),
-    'otp', (select jsonb_build_object('from', x.sender, 'body', x.body, 'at', x.received_at,
-                                      'code', (regexp_match(x.body, '([0-9]{4,8})'))[1])
+    'otp', (select jsonb_build_object('from', x.sender, 'body', x.body, 'at', x.created_at,
+                                      'code', coalesce((regexp_match(x.body, '(otp|one-?time (pin|password|code)|verification code|security code|\mcode|\mpin)[^0-9]{0,25}\m([0-9]{4,8})\M', 'i'))[3],
+                                                       (regexp_match(x.body, '\m([0-9]{4,8})\M[^0-9]{0,6}(is|as) your', 'i'))[1]))
               from public.kiosk_app_sms x where x.device_id = p_device and x.kind = 'otp'
-               and x.received_at > now() - interval '15 minutes' order by x.received_at desc limit 1));
+               and x.created_at > now() - interval '15 minutes' order by x.created_at desc limit 1));
 end $$;
 revoke all on function public.kiosk_app_sim_info(text) from public, anon, authenticated;
 create or replace function public.kiosk_app_list(p_passcode text)
@@ -996,7 +999,7 @@ begin
          and (r.offline_alerted_at is null or r.offline_alerted_at < now() - interval '60 minutes') then
         v_why := case when r.charging is false and coalesce(r.battery,100) <= 15
                         then ' Last report: battery ' || r.battery || '% and NOT charging - the battery probably ran out.'
-                      when r.charging is false and r.power_windows is null
+                      when r.charging is false and r.power_windows is null and (r.wifi is false or r.net_type in ('mobile','none'))
                         then ' Last report: NOT charging (battery ' || coalesce(r.battery::text,'?') || '%) - possible BROWNOUT (router off too).'
                              || ' The tablet keeps punches on battery.'
                       when r.wifi is false then ' Last report: no Wi-Fi.'
@@ -1078,7 +1081,8 @@ begin
                 || public.kiosk_app_dur(now() - r.unplugged_since) || ' and the Wi-Fi is down too'
                 || case when r.net_type = 'mobile' then ' (reporting on mobile data)' else '' end
                 || '. Battery ' || coalesce(r.battery::text,'?') || '%'
-                || coalesce(', about ' || round(r.battery / greatest(coalesce(r.drain_on, 8), 1))::int || ' h left with the screen on', '')
+                || case when r.drain_on_n >= 3 and r.drain_on > 0 and r.battery is not null
+                        then ', about ' || round(r.battery / greatest(r.drain_on, 1))::int || ' h left with the screen on' else '' end
                 || '. Punches are kept on the tablet. Updates every hour until power is back.');
       else
       perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is NOT CHARGING'
@@ -1130,14 +1134,17 @@ begin
        where device_id = r.device_id;
     end if;
   end loop;
-  for e in select ev.id, ev.event, ev.at, coalesce(nullif(k.name,''), ev.device_id) as nm
+  for e in select ev.id, ev.event, ev.at, ev.device_id, coalesce(nullif(k.name,''), ev.device_id) as nm
              from public.kiosk_app_events ev
              left join public.kiosk_app_devices k on k.device_id = ev.device_id
             where not ev.notified and ev.at > now() - interval '1 hour'
             order by ev.at loop
     if e.event like 'tablet restarted%' or e.event like 'updated to build%'
        or e.event like 'maintenance opened%' or e.event like 'update install failed%'
-       or e.event like 'installing build%' or e.event in ('screen on failed', 'screen woken by phone call') then
+       or e.event like 'installing build%' or e.event = 'screen on failed'
+       or (e.event = 'screen woken by phone call'
+           and not exists (select 1 from public.kiosk_app_events e3 where e3.device_id = e.device_id and e3.event = e.event
+                             and e3.notified and e3.at > now() - interval '10 minutes')) then
       v_sent := v_sent + 1;
       exit when v_sent > 5;
       perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - '
@@ -1182,7 +1189,7 @@ begin
   delete from public.kiosk_app_load_shots x where not exists (select 1 from public.kiosk_app_devices d where d.device_id = x.device_id);
   delete from public.kiosk_app_data_days where day < v_today - 400;
   delete from public.kiosk_app_sms where received_at < now() - interval '180 days' and load_id is null;
-  delete from public.kiosk_app_sms where kind = 'otp' and received_at < now() - interval '15 minutes';
+  delete from public.kiosk_app_sms where kind = 'otp' and created_at < now() - interval '15 minutes';
 end $$;
 revoke all on function public.kiosk_app_tick() from public, anon, authenticated;
 do $$ begin perform cron.unschedule('kiosk-app-tick'); exception when others then null; end $$;
