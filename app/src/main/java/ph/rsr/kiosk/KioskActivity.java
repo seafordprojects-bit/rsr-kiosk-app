@@ -657,29 +657,46 @@ public class KioskActivity extends Activity implements Core.Host {
     private void askPasscode() {
         if (passDialog != null && passDialog.isShowing()) return;
         if (prefs.passcodeLocked()) {
-            new AlertDialog.Builder(this).setMessage("Too many wrong tries. Wait 5 minutes.").setPositiveButton("OK", null).show();
+            showTimed(new AlertDialog.Builder(this).setMessage("Too many wrong tries. Wait 5 minutes.").setPositiveButton("OK", null).create());
             return;
         }
-        EditText in = new EditText(this);
-        in.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        in.setHint("Passcode");
+        PassBox box = new PassBox(this, "Passcode");
+        int pad = Math.round(20 * getResources().getDisplayMetrics().density);
+        box.view.setPadding(pad, pad / 2, pad, 0);
         passDialog = new AlertDialog.Builder(this)
                 .setTitle("RSR Kiosk settings")
-                .setView(in)
+                .setView(box.view)
                 .setPositiveButton("Open", (d, w) -> {
-                    if (prefs.checkPasscode(in.getText().toString())) {
+                    if (prefs.checkPasscode(box.text())) {
                         prefs.passcodeOk();
                         startActivity(new Intent(this, SettingsActivity.class));
                     } else {
-                        prefs.passcodeWrong();
+                        wrongPasscode(prefs.passcodeWrong());
                     }
                 })
                 .setNegativeButton("Cancel", null)
                 .create();
         passDialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
-        passDialog.show();
-        // Close by itself after 30 s so it is never left on screen for workers.
-        ui.postDelayed(() -> { if (passDialog != null && passDialog.isShowing()) passDialog.dismiss(); }, 30_000);
+        showTimed(passDialog);
+    }
+
+    /** Wrong passcode: say so, with the tries left; "Try again" opens the passcode box again. */
+    private void wrongPasscode(int triesLeft) {
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("Wrong passcode")
+                .setMessage(PasscodeText.wrong(triesLeft));
+        if (PasscodeText.canRetry(triesLeft)) {
+            b.setPositiveButton("Try again", (d, w) -> askPasscode()).setNegativeButton("Cancel", null);
+        } else {
+            b.setPositiveButton("OK", null);
+        }
+        showTimed(b.create());
+    }
+
+    /** Settings pop-ups close by themselves after 30 s so they are never left on screen for workers. */
+    private void showTimed(AlertDialog d) {
+        d.show();
+        ui.postDelayed(() -> { try { if (d.isShowing()) d.dismiss(); } catch (Exception ignored) { } }, 30_000);
     }
 
     // ---- Core.Host ----------------------------------------------------------------------------

@@ -62,8 +62,8 @@ public class SettingsActivity extends Activity {
         title("RSR Kiosk — first setup");
         note("Device owner (full lock): " + (Policy.isOwner(this) ? "YES" : "NO — screen pinning only"));
         EditText name = field("Tablet name (e.g. Carmen kiosk)", prefs.name(), InputType.TYPE_CLASS_TEXT);
-        EditText p1 = field("Exit passcode (6 to 10 digits)", "", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        EditText p2 = field("Repeat passcode", "", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        EditText p1 = passField("Exit passcode (6 to 10 digits)");
+        EditText p2 = passField("Repeat passcode");
         button("Save and start kiosk", v -> {
             String a = p1.getText().toString(), c = p2.getText().toString();
             if (name.getText().toString().trim().isEmpty()) { toast("Enter the tablet name"); return; }
@@ -170,13 +170,12 @@ public class SettingsActivity extends Activity {
     private void changePasscode() {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
-        EditText a = new EditText(this), c = new EditText(this);
-        a.setHint("New passcode (6-10 digits)");
-        c.setHint("Repeat new passcode");
-        a.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        c.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        l.addView(a);
-        l.addView(c);
+        PassBox pa = new PassBox(this, "New passcode (6-10 digits)"), pc = new PassBox(this, "Repeat new passcode");
+        EditText a = pa.input, c = pc.input;
+        int pad = dp(20);
+        l.setPadding(pad, pad / 2, pad, 0);
+        l.addView(pa.view);
+        l.addView(pc.view);
         new AlertDialog.Builder(this).setTitle("Change passcode").setView(l)
                 .setPositiveButton("Save", (d, w) -> {
                     String x = a.getText().toString();
@@ -234,6 +233,19 @@ public class SettingsActivity extends Activity {
         e.setSingleLine(true);
         box.addView(e, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return e;
+    }
+
+    /** Passcode field with an eye button (Show / Hide) to check the digits before saving. */
+    private EditText passField(String label) {
+        TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextSize(15);
+        l.setTextColor(0xFF333333);
+        l.setPadding(0, dp(10), 0, 0);
+        box.addView(l);
+        PassBox p = new PassBox(this, "");
+        box.addView(p.view, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return p.input;
     }
 
     private Button button(String text, View.OnClickListener l) {

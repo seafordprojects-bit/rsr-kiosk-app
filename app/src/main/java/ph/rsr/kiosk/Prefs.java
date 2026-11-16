@@ -100,11 +100,13 @@ final class Prefs {
 
     /** Wrong-passcode throttle: after 5 wrong tries, wait 5 minutes. */
     boolean passcodeLocked() { return System.currentTimeMillis() < sp.getLong("pc_lock", 0L); }
-    void passcodeWrong() {
+    /** Counts a wrong try; returns the tries left before the 5-minute wait (0 = the wait starts now). */
+    int passcodeWrong() {
         int n = sp.getInt("pc_fails", 0) + 1;
         SharedPreferences.Editor e = sp.edit().putInt("pc_fails", n);
         if (n >= 5) e.putInt("pc_fails", 0).putLong("pc_lock", System.currentTimeMillis() + 5 * 60_000L);
         e.apply();
+        return Math.max(0, 5 - n);
     }
     void passcodeOk() { sp.edit().putInt("pc_fails", 0).remove("pc_lock").apply(); }
 
