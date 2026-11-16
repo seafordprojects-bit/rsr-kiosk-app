@@ -1,3 +1,4 @@
+const PUBLIC_CHECK = "select t as table_name,\n       has_table_privilege('anon', 'public.' || t, 'select') as public_can_read,\n       has_table_privilege('authenticated', 'public.' || t, 'select') as signed_in_can_read\n  from unnest(array['kiosk_app_devices','kiosk_app_events','kiosk_app_shots','kiosk_app_conn','kiosk_app_data_days',\n                    'kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots']) t;\n";
 // SQL test for kiosk-app.sql on a throwaway local Postgres (npm i embedded-postgres pg; run as a non-root user from this folder).
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
@@ -630,6 +631,8 @@ await q(`delete from sent`);
 }
 
 // anon cannot read tables
+// the owner's go-live check (supabase/paste/build6-3-public-check.sql): every table "public can read = false"
+{ const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===8 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 8 tables'); }
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
 ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c.query(`select public.kiosk_app_tick()`);}catch(e){tickDenied=true;} ok(tickDenied,'anon cannot run tick');
