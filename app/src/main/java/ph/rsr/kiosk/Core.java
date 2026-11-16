@@ -219,10 +219,16 @@ final class Core {
     private void callWake() {
         if (prefs.phone()) return;
         long now = System.currentTimeMillis();
-        if (now - lastCallWake < 60_000) return;   // one ringing call = one wake
-        lastCallWake = now;
+        // owner test 2026-11-16: a 2nd / 3rd call soon after the first stayed black (the old 60 s guard skipped it).
+        // Every call now wakes and lifts the black page; only the office report is limited (one per 15 s).
         touched();
         if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreenChecked();
+        // the kiosk window may only be back on screen a moment later: lift the black page / dim backlight again
+        for (long d : new long[]{2000, 5000}) {
+            main.postDelayed(() -> { Host h = host.get(); if (h != null) h.wakeAndBrighten(); }, d);
+        }
+        if (now - lastCallWake < 15_000) return;
+        lastCallWake = now;
         reportEvent("screen woken by phone call");
         beatSoon();
     }
