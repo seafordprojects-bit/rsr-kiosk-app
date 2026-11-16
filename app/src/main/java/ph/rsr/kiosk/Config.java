@@ -21,8 +21,9 @@ final class Config {
     /** Heartbeat + command poll every 60 s. Two tablets = ~2,900 small calls a day, far inside the free tier. */
     static final long BEAT_MS = 60_000L;
 
-    /** Build-6: with the screen off on battery (deep sleep), wake this often to report and pick up commands. */
-    static final long CHECKIN_MS = 15 * 60_000L;
+    /** Build-6: with the screen off on battery (deep sleep), wake this often to report and pick up commands.
+     *  Owner 2026-11-16: every hour (15 min reported 8-10 times in one generator break). */
+    static final long CHECKIN_MS = 60 * 60_000L;
 
     /** Hang check: the page must answer a tiny script within this time, else it is reloaded. */
     static final long HANG_CHECK_MS = 60_000L;

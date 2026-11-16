@@ -192,9 +192,9 @@ final class Core {
         scheduleCheckin();
     }
 
-    // ---- build-6: 15-minute check-in while the screen is off on battery -------------------------
+    // ---- build-6: hourly check-in while the screen is off on battery ----------------------------
     // On the charger the tablet stays reachable (Awake). On battery with the screen off (Carmen at night, generator
-    // off) it falls into deep sleep and the office's commands wait until morning (found 2026-11-04). Every 15 min an
+    // off) it falls into deep sleep and the office's commands wait until morning (found 2026-11-04). Every hour an
     // alarm wakes it for about 45 s: report, pick up a command, send waiting telco texts. Phone: never (battery).
 
     void scheduleCheckin() {

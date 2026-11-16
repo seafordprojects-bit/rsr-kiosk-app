@@ -478,6 +478,14 @@ ok(SM.some(m=>m.includes('(EXPIRED,')) && SM.some(m=>m.includes('(expiring,')) &
 ok(!SM.some(m=>m.includes('SHOPEE') || m.includes('11.11') || m.includes('50GB') || m.includes('FREE') || m.includes('Pasaload')),'ads, freebies, pasaload never sent to Telegram');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes(' text (')),'texts sent once');
+// OTP for the telco app: on the Tablets page 15 min, never Telegram, never a load, then deleted
+await sms('DITO','Your DITO OTP is 482913. Do not share this code with anyone.');
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('482913')),'OTP never sent to Telegram');
+let SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
+ok(SI.otp && SI.otp.code==='482913' && !SI.texts.some(x=>x.body.includes('482913')),'OTP shown on its own on the SIM card');
+await q(`update kiosk_app_sms set received_at=now()-interval '16 minutes' where body like '%482913%'`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select count(*)::int n from kiosk_app_sms where body like '%482913%'`))[0].n===0 && (await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r.otp===null,'OTP deleted after 15 min');
 // parser edge cases
 const P=async (b)=>(await q(`select public.kiosk_app_parse_load($1,'2026-11-16') r`,[b]))[0].r;
 ok((await P('Bad date 02/30/2027 until')).expires_on===null,'impossible date never breaks parsing');
@@ -589,6 +597,20 @@ await q(`insert into kiosk_app_conn(device_id,kind,started_at) values ($1,'mobil
 await q(`update kiosk_app_devices set last_seen=now()-interval '4 hours' where device_id=$1`,[B6]);
 ok((await q(`select public.kiosk_app_down_min($1, now()-interval '1 day') m`,[B6]))[0].m===62,'silent tablet: open period stops at last report + 2 min');
 await q(`delete from kiosk_app_conn where device_id=$1`,[B6]); await q(`update kiosk_app_devices set last_seen=now() where device_id=$1`,[B6]);
+// BROWNOUT (grid tablet): charger and Wi-Fi lost together -> brownout wording; offline after that -> brownout reason
+await q(`update kiosk_app_devices set power_windows=null, unplugged_alerted=false, unplugged_alerted_at=null, offline_alerted_at=null, offline_first_at=null where device_id=$1`,[B6]);
+await beat({device_id:B6,battery:80,charging:false,page_url:MAN,net_type:'mobile',wifi:false});
+await q(`update kiosk_app_devices set unplugged_since=now()-interval '6 minutes' where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+const mh2=(await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h;
+ok((await q(`select msg from sent`)).some(x=>x.msg.includes('POSSIBLE BROWNOUT') && x.msg.includes('reporting on mobile data') && x.msg.includes('Battery 80%')),'brownout: charger + Wi-Fi lost together');
+await q(`update kiosk_app_devices set last_seen=now()-interval '15 minutes', sched_on=null, sched_off=null where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+if (mh2>=6 && mh2<22) ok((await q(`select msg from sent`)).some(x=>x.msg.includes('is OFFLINE') && x.msg.includes('possible BROWNOUT')),'offline after unplugged: brownout reason');
+await beat({device_id:B6,battery:79,charging:true,page_url:MAN,net_type:'wifi',wifi:true});
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).some(x=>x.msg.includes('Mandaue Kiosk is charging again')),'power back: charging again message');
+await q(`update kiosk_app_devices set offline_first_at=null, offline_alerted_at=null where device_id=$1`,[B6]);
 // a Wi-Fi password is only handed to a tablet that confirmed its secret
 await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2)`,[B6,JSON.stringify({ssid:'X1',pass:'abcdefgh'})]);
 await q(`update kiosk_app_devices set token_confirmed=false where device_id=$1`,[B6]);
@@ -605,6 +627,14 @@ ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c
 let stOk=true; try{ await c.query(`select public.kiosk_app_status()`);}catch(e){stOk=false;} ok(stOk,'anon can read status');
 let shotDenied=false; try{ await c.query(`select * from kiosk_app_shots`);}catch(e){shotDenied=true;} ok(shotDenied,'anon cannot read screenshots directly');
 let beatOk=true; try{ await c.query(`select public.kiosk_app_beat('{"device_id":"app-t1"}')`);}catch(e){beatOk=false; console.log(e.message)} ok(beatOk,'anon can beat');
+// build-6 data exposure: the public key reads none of the new tables or helper functions
+for (const t of ['kiosk_app_conn','kiosk_app_data_days','kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots']) {
+  let d=false; try{ await c.query(`select * from ${t}`);}catch(e){d=true;} ok(d,'public key cannot read '+t);
+}
+for (const f of [`kiosk_app_sim_info('x')`,`kiosk_app_down_min('x', now())`,`kiosk_app_sms_kind('x')`,`kiosk_app_parse_load('x', current_date)`]) {
+  let d=false; try{ await c.query(`select public.${f}`);}catch(e){d=true;} ok(d,'public key cannot run '+f.split('(')[0]);
+}
+{ const r=(await c.query(`select public.kiosk_app_load_shot_get('000000','x') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no load screenshot'); }
 await c.query(`reset role`);
 // rollback
 await c.query(fs.readFileSync('./kiosk-app-rollback.sql','utf8'));

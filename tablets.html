@@ -98,7 +98,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-16a';
+const PAGE_VERSION = 'v2026-11-16b';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -340,6 +340,8 @@ function simHtml(t) {
     ${load}${close}
     <div class="mute">SIM ${esc(s.state || '?')}${s.operator ? ' (' + esc(s.operator) + ')' : ''} - data today ${s.data_today_mb != null ? esc(s.data_today_mb) + ' MB' : '-'}
       - telco texts ${s.sms_ok === true ? 'read by the app' : s.sms_ok === false ? '<span style="color:var(--warn)">NOT allowed on this tablet (use screenshots)</span>' : '?'}</div>
+    ${s.otp ? `<div class="warnbox">Sign-in code from ${esc(s.otp.from)} (${esc(ago(s.otp.at))}): <b style="font-size:22px;letter-spacing:2px">${esc(s.otp.code || '')}</b>
+      <br><span class="mute">${esc(s.otp.body)}</span><br><span class="mute">Shown for 15 minutes only, then deleted. Never sent to Telegram.</span></div>` : ''}
     ${s.load_wait_from ? '<div class="mute">Waiting for the telco text after your load (since ' + esc(hhmm(s.load_wait_from)) + ')...</div>' : ''}
     ${texts ? det(t.device_id + '|sms', 'Latest telco texts', texts) : ''}
     <div class="btns" style="margin-top:8px">
