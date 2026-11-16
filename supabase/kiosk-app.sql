@@ -1299,7 +1299,10 @@ begin
     -- A generator tablet (Carmen) is only judged while the generator should be running.
     if v_pwr and r.unplugged_since is not null and r.unplugged_since < now() - interval '5 minutes'
        and (r.unplugged_alerted_at is null
-            or r.unplugged_alerted_at < now() - case when v_work or v_win then interval '30 minutes' else interval '2 hours' end) then
+            or r.unplugged_alerted_at < now() - case
+                 -- BROWNOUT updates (grid tablet, Wi-Fi down too): every hour (owner 2026-11-16 18:18)
+                 when not v_win and (r.net_type in ('mobile','none') or r.wifi is false) then interval '60 minutes'
+                 when v_work or v_win then interval '30 minutes' else interval '2 hours' end) then
       -- BUILD-6 (owner 2026-11-16, Mandaue on grid): charger AND Wi-Fi lost together = most likely a BROWNOUT
       -- (the yard router lost power too). Say so, and how long the battery should last.
       if not v_win and (r.net_type in ('mobile','none') or r.wifi is false) then
@@ -1308,7 +1311,7 @@ begin
                 || case when r.net_type = 'mobile' then ' (reporting on mobile data)' else '' end
                 || '. Battery ' || coalesce(r.battery::text,'?') || '%'
                 || coalesce(', about ' || round(r.battery / greatest(coalesce(r.drain_on, 8), 1))::int || ' h left with the screen on', '')
-                || '. Punches are kept on the tablet. Updates every 30 min until power is back.');
+                || '. Punches are kept on the tablet. Updates every hour until power is back.');
       else
       perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is NOT CHARGING'
               || case when v_win then ' although the generator should be ON (check charger, cable, plug)' else '' end

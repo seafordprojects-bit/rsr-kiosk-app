@@ -604,6 +604,12 @@ await q(`update kiosk_app_devices set unplugged_since=now()-interval '6 minutes'
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 const mh2=(await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h;
 ok((await q(`select msg from sent`)).some(x=>x.msg.includes('POSSIBLE BROWNOUT') && x.msg.includes('reporting on mobile data') && x.msg.includes('Battery 80%')),'brownout: charger + Wi-Fi lost together');
+await q(`update kiosk_app_devices set unplugged_alerted_at=now()-interval '35 minutes' where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('BROWNOUT')),'brownout update not after 35 min');
+await q(`update kiosk_app_devices set unplugged_alerted_at=now()-interval '61 minutes' where device_id=$1`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('BROWNOUT') && x.msg.includes('Updates every hour')).length===1,'brownout update every hour');
 await q(`update kiosk_app_devices set last_seen=now()-interval '15 minutes', sched_on=null, sched_off=null where device_id=$1`,[B6]);
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 if (mh2>=6 && mh2<22) ok((await q(`select msg from sent`)).some(x=>x.msg.includes('is OFFLINE') && x.msg.includes('possible BROWNOUT')),'offline after unplugged: brownout reason');

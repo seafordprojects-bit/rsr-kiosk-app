@@ -25,7 +25,7 @@ public class SmsReceiver extends BroadcastReceiver {
             for (SmsMessage m : parts) if (m != null && m.getDisplayMessageBody() != null) b.append(m.getDisplayMessageBody());
             long at = parts[0].getTimestampMillis() > 0 ? parts[0].getTimestampMillis() : System.currentTimeMillis();
             TextQueue.add(c, from.trim(), TelcoText.clip(TelcoText.maskNumbers(b.toString())), at);
-            Core.get(c).sendTextsSoon();
+            Core.get(c).textArrived();   // at once, even in deep sleep (screen stays off)
         } catch (Exception ignored) { }
     }
 }

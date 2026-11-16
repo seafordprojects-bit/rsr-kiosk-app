@@ -247,6 +247,32 @@ final class Core {
 
     void sendTextsSoon() { bg.post(this::sendTexts); }
 
+    /**
+     * A telco text just arrived (owner 2026-11-16: a sign-in code must reach the Tablets page at once, not at the next
+     * hourly check-in). Keep the processor awake ~50 s - NOT the screen - and send right away, then again at 10 / 25 /
+     * 45 s in case the Wi-Fi is still waking up from sleep. The app's foreground service keeps the network allowed in
+     * deep sleep. A few texts a month: no real battery cost. The hourly check-in is not changed.
+     */
+    void textArrived() {
+        final PowerManager.WakeLock wl;
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:text");
+            wl.setReferenceCounted(false);
+            wl.acquire(55_000L);
+        } catch (Exception e) {
+            sendTextsSoon();
+            return;
+        }
+        bg.post(this::sendTexts);
+        bg.postDelayed(this::sendTexts, 10_000);
+        bg.postDelayed(this::sendTexts, 25_000);
+        bg.postDelayed(() -> {
+            sendTexts();
+            try { if (wl.isHeld()) wl.release(); } catch (Exception ignored) { }
+        }, 45_000);
+    }
+
     private void sendTexts() {
         for (int k = 0; k < 10; k++) {
             org.json.JSONArray q = TextQueue.list(ctx);
