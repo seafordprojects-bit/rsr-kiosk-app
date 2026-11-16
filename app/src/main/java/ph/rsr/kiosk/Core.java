@@ -50,6 +50,10 @@ final class Core {
         void takeScreenshot(java.util.function.Consumer<String> done);
         /** Is a worker in the middle of a punch (employee selected / dialog open)? Main thread; answers async. */
         void pageBusy(java.util.function.Consumer<Boolean> answer);
+        /** Build-6 office "Retry stuck punches": un-stick rejected punches the page still has, then sync. Main thread. */
+        void retryPunches(java.util.function.Consumer<String> done);
+        /** Build-6 stronger wake: ask Android to turn the screen on for the kiosk window itself. Main thread. */
+        void turnScreenOnNow();
     }
 
     private final Context ctx;
@@ -185,6 +189,63 @@ final class Core {
         scheduleNextAlarm();
         scheduleReportAlarm();
         scheduleUpdateAlarm();
+        scheduleCheckin();
+    }
+
+    // ---- build-6: 15-minute check-in while the screen is off on battery -------------------------
+    // On the charger the tablet stays reachable (Awake). On battery with the screen off (Carmen at night, generator
+    // off) it falls into deep sleep and the office's commands wait until morning (found 2026-11-04). Every 15 min an
+    // alarm wakes it for about 45 s: report, pick up a command, send waiting telco texts. Phone: never (battery).
+
+    void scheduleCheckin() {
+        AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        Intent i = new Intent(ctx, ScheduleReceiver.class).setAction(ScheduleReceiver.ACTION_CHECKIN);
+        PendingIntent pi = PendingIntent.getBroadcast(ctx, 11, i, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        if (prefs.phone()) { am.cancel(pi); return; }
+        long next = System.currentTimeMillis() + Config.CHECKIN_MS;
+        boolean exact = Build.VERSION.SDK_INT < 31 || am.canScheduleExactAlarms();
+        if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, pi);
+    }
+
+    void checkinAlarm() {
+        scheduleCheckin();
+        if (prefs.phone()) return;
+        PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+        boolean asleep = pm != null && !pm.isInteractive();
+        if (!asleep || plugged()) return;   // screen on or on the charger: the normal 1-minute loop is running
+        try {
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:checkin").acquire(45_000L);
+        } catch (Exception ignored) { }
+        bg.postDelayed(this::beat, 12_000);         // Wi-Fi reconnects from sleep first
+        bg.postDelayed(this::sendTexts, 14_000);
+        bg.postDelayed(this::beat, 35_000);         // second try (and picks up a command sent meanwhile)
+    }
+
+    // ---- build-6: telco texts to the office ------------------------------------------------------
+
+    void sendTextsSoon() { bg.post(this::sendTexts); }
+
+    private void sendTexts() {
+        for (int k = 0; k < 10; k++) {
+            org.json.JSONArray q = TextQueue.list(ctx);
+            if (q.length() == 0) return;
+            try {
+                JSONObject t = q.getJSONObject(0);
+                String body = t.optString("body", "");
+                long at = t.optLong("at", System.currentTimeMillis());
+                JSONObject b = new JSONObject().put("p_device", prefs.deviceId()).put("p_token", prefs.token())
+                        .put("p_sender", t.optString("from", "")).put("p_body", body).put("p_at", isoUtc(at));
+                String resp = Net.rpc("kiosk_app_sms_put", b.toString());
+                JSONObject r = resp.trim().startsWith("{") ? new JSONObject(resp) : new JSONObject();
+                String err = r.optString("error", "");
+                if (err.equals("token") || err.startsWith("too many")) return;   // keep; try again later
+                TextQueue.removeFirst(ctx, at, body);                               // sent (or not storable: empty)
+            } catch (Exception e) {
+                return;   // offline: kept on the tablet, sent with a later report
+            }
+        }
     }
 
     /** 01:00 every night: wake the processor for the update check (the tablet sleeps at night). */
@@ -255,6 +316,7 @@ final class Core {
                 if (temp != Integer.MIN_VALUE && temp > -200 && temp < 1000) p.put("battery_temp", temp / 10.0);
             }
             net.addTo(p);
+            SimWatch.addTo(ctx, p);   // build-6: connection type, SIM, mobile data used
             JSONObject outage = net.pendingOutage();
             if (outage != null) p.put("outage", outage);
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
@@ -287,6 +349,7 @@ final class Core {
             }
             net.beatOk();
             if (ev != null && ev.equals(pendingEvent)) pendingEvent = null;
+            if (TextQueue.list(ctx).length() > 0) bg.post(this::sendTexts);   // texts that waited for the network
 
             JSONObject r = resp.trim().startsWith("{") ? new JSONObject(resp) : new JSONObject();
             if ("token".equals(r.optString("error"))) {
@@ -354,7 +417,7 @@ final class Core {
                 break;
             case "screen_on":
                 touched();   // at once: the night / evening idle screen-off counts from this press
-                if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreen();
+                if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreenChecked();
                 // The display may already be on but dimmed to 1% with the page black (idle saver): lift both.
                 main.postDelayed(() -> { Host h = host.get(); if (h != null) h.wakeAndBrighten(); }, 500);
                 ack(id, "done");
@@ -399,6 +462,29 @@ final class Core {
                 } catch (Exception e) {
                     ack(id, "failed: upload (" + e.getClass().getSimpleName() + ")");
                 }
+                break;
+            }
+            case "retry_punches": {
+                // never under a worker's hands: wait for 10 s without a touch and nobody mid-punch (at most 2 min)
+                if (!waitUntilSafe(10, 120)) { ack(id, "refused: kiosk in use - send again later"); break; }
+                if (host.get() == null) { ack(id, "failed: kiosk screen not running"); break; }
+                final String[] res = {null};
+                final java.util.concurrent.CountDownLatch l = new java.util.concurrent.CountDownLatch(1);
+                main.post(() -> {
+                    Host hh = host.get();
+                    if (hh == null) { l.countDown(); return; }
+                    hh.retryPunches(v -> { res[0] = v; l.countDown(); });
+                });
+                try { l.await(10, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+                ack(id, res[0] == null ? "failed: page did not answer" : res[0]);
+                break;
+            }
+            case "set_wifi": {
+                // switching Wi-Fi drops the network for a few seconds (punches are saved on the tablet anyway):
+                // still never in a punch rush or under a worker's hands
+                if (rushBlocks()) { ack(id, "refused: punch rush time - send again later"); break; }
+                if (!waitUntilSafe(30, 300)) { ack(id, "refused: kiosk in use for 5 min - send again later"); break; }
+                ack(id, WifiSetter.apply(ctx, arg));
                 break;
             }
             default:
@@ -450,7 +536,7 @@ final class Core {
             lastOnHours = onHours;
         }
         if (changed && onHours) {
-            if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreen();
+            if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreenChecked();
             return;
         }
         // Maintenance: the office is in Android settings, where touches do not reach the kiosk's idle timer.
@@ -550,6 +636,62 @@ final class Core {
             Log.w(TAG, "wake", e);
         }
         bringToFront();
+    }
+
+    /**
+     * Build-6 (06:45 screen-on failed 2026-11-04 although "Turn screen on" was allowed): wake the screen, then
+     * CHECK it really came on. If not: a second, stronger way (the kiosk window itself asks Android to turn the
+     * screen on). Still off: tell the office ("screen on failed"), so it is seen on the Tablets page / Telegram.
+     * Also lifts the page's black idle screen, so the first worker sees the keypad.
+     */
+    void wakeScreenChecked() {
+        try {   // keep the processor up for the checks below even if the screen stays off
+            PowerManager pm0 = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            pm0.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:wakecheck").acquire(15_000L);
+        } catch (Exception ignored) { }
+        wakeScreen();
+        main.postDelayed(() -> { Host h = host.get(); if (h != null) h.wakeAndBrighten(); }, 800);
+        bg.postDelayed(() -> {
+            if (screenIsOn()) return;
+            Log.w(TAG, "screen did not come on: second try");
+            wakeScreenStrong();
+            bg.postDelayed(() -> {
+                if (screenIsOn()) { reportEvent("screen on needed a second try"); }
+                else { reportEvent("screen on failed"); }
+                beat();
+            }, 4000);
+        }, 4000);
+    }
+
+    private boolean screenIsOn() {
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            return pm != null && pm.isInteractive();
+        } catch (Exception e) {
+            return true;   // unknown: do not report a failure we cannot see
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void wakeScreenStrong() {
+        try {
+            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+            pm.newWakeLock(PowerManager.FULL_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP
+                    | PowerManager.ON_AFTER_RELEASE, "rsr:wake2").acquire(8000);
+        } catch (Exception e) {
+            Log.w(TAG, "wake2", e);
+        }
+        main.post(() -> {
+            try {
+                Host h = host.get();
+                if (h != null) h.turnScreenOnNow();
+                Intent i = new Intent(ctx, KioskActivity.class).putExtra(KioskActivity.EXTRA_WAKE, true);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                ctx.startActivity(i);
+            } catch (Exception e) {
+                Log.w(TAG, "front2", e);
+            }
+        });
     }
 
     void bringToFront() {
@@ -687,7 +829,7 @@ final class Core {
         boolean onHours = isOnHours();
         if (onHours) {
             synchronized (this) { lastOnHours = true; }
-            wakeScreen();
+            if (prefs.inMaintenance()) wakeScreenOnly(); else wakeScreenChecked();
         } else {
             try {
                 PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);

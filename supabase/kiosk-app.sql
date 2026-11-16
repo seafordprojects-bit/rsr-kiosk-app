@@ -140,6 +140,7 @@ alter table public.kiosk_app_devices add column if not exists sim_provider      
 alter table public.kiosk_app_devices add column if not exists sim_close_days    integer;       -- number closes after this many days without a load
 alter table public.kiosk_app_devices add column if not exists sim_alerts        jsonb not null default '{}'::jsonb;  -- reminders already sent
 alter table public.kiosk_app_devices add column if not exists load_wait_from    timestamptz;   -- owner pressed "I just loaded"
+alter table public.kiosk_app_devices add column if not exists battery_unrestricted boolean;     -- Samsung battery "Unrestricted" (night check-ins need it)
 
 -- Wi-Fi downtime: one row per period the tablet was NOT on Wi-Fi (on mobile data, or offline).
 create table if not exists public.kiosk_app_conn (
@@ -369,6 +370,7 @@ begin
     sim_operator    = case when p ? 'sim_operator' then nullif(left(regexp_replace(coalesce(p->>'sim_operator',''), '[^[:alnum:] ._-]', '', 'g'), 40), '') else k.sim_operator end,
     sim_state       = case when p->>'sim_state' in ('ready','absent','locked','unknown') then p->>'sim_state' else k.sim_state end,
     sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
+    battery_unrestricted = case when jsonb_typeof(p->'battery_unrestricted') = 'boolean' then (p->>'battery_unrestricted')::boolean else k.battery_unrestricted end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -567,6 +569,7 @@ begin
                                order by e2.at desc limit 5) e)
          ) || jsonb_build_object(
            -- BUILD-6: connection + Wi-Fi downtime
+           'battery_unrestricted', k.battery_unrestricted,
            'net', jsonb_build_object('type', k.net_type, 'since', k.net_since, 'mobile_signal', k.mobile_signal, 'mobile_ok', k.mobile_ok,
                     'down_today_min', public.kiosk_app_down_min(k.device_id, (date_trunc('day', now() at time zone 'Asia/Manila')) at time zone 'Asia/Manila'),
                     'down_7d_min', public.kiosk_app_down_min(k.device_id, now() - interval '7 days'),
@@ -1390,11 +1393,11 @@ select count(*) as tablets,                                                     
        (select count(*) from information_schema.columns where table_schema = 'public'
           and table_name = 'kiosk_app_devices' and column_name in ('page_version','page_error','page_error_at','shot_at')) as new_columns  -- expect 4
   from public.kiosk_app_devices;
--- build-6 check: expect 5 tables, 6 functions, 14 columns
+-- build-6 check: expect 5 tables, 6 functions, 15 columns
 select (select count(*) from information_schema.tables where table_schema = 'public'
           and table_name in ('kiosk_app_conn','kiosk_app_data_days','kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots')) as build6_tables,
        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
           and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info')) as build6_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
-                              'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from')) as build6_columns;
+                              'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;

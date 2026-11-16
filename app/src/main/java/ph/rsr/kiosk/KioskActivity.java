@@ -762,6 +762,44 @@ public class KioskActivity extends Activity implements Core.Host {
                 + "else if(typeof resetDimTimer==='function')resetDimTimer();}catch(e){}})()", null);
     }
 
+    static final String EXTRA_WAKE = "wake";
+
+    /** Build-6 second wake path: the kiosk window itself asks Android to turn the screen on (works where a
+     *  wake lock alone is ignored). Keyguard is off by policy; asked to dismiss anyway (harmless). */
+    @Override
+    public void turnScreenOnNow() {
+        try {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+            android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            if (km != null && km.isKeyguardLocked()) km.requestDismissKeyguard(this, null);
+        } catch (Exception e) {
+            Log.w("RSRKiosk", "turn screen on", e);
+        }
+    }
+
+    /** Build-6 office "Retry stuck punches" (kiosk/index.html v2026-11-12b+): punches the page marked REJECTED
+     *  ("stuck") are given a fresh try, exactly like the page's own Retry button, then both queues are pushed.
+     *  A stuck day the tablet no longer has a record for is left alone (that one needs a check in Payroll).
+     *  Answers e.g. "done: 2 stuck punches retried, 5 waiting pushed". */
+    @Override
+    public void retryPunches(java.util.function.Consumer<String> done) {
+        if (web == null || mainFrameError) { done.accept("failed: kiosk page not loaded"); return; }
+        web.evaluateJavascript("(function(){try{"
+                + "if(typeof syncPending==='undefined')return 'failed: not the kiosk page';"
+                + "var n=0,w=0,left=0;for(var k in syncPending){var m=syncPending[k];if(!m)continue;"
+                + "if(m.dead){if(typeof records!=='undefined'&&records[k]){m.dead=false;m.attempts=0;n++;}else{left++;}}else{w++;}}"
+                + "if(n&&typeof savePending==='function')savePending();"
+                + "if(typeof updateSyncBadge==='function')updateSyncBadge();"
+                + "var off=(typeof offqCount==='function')?offqCount():0;"
+                + "if(typeof syncFlush==='function')syncFlush();"
+                + "if(typeof flushOfflinePunches==='function')flushOfflinePunches();"
+                + "setTimeout(function(){try{if(typeof sendHeartbeat==='function')sendHeartbeat();}catch(e){}},20000);"
+                + "return 'done: '+n+' stuck retried, '+(w+off)+' waiting pushed'+(left?', '+left+' need a check in Payroll':'');"
+                + "}catch(e){return 'failed: '+(e&&e.message?String(e.message).slice(0,80):'error');}})()",
+                v -> done.accept(v == null ? null : v.replace("\"", "").trim()));
+    }
+
     @Override
     public void nudgePage() {
         if (web == null || mainFrameError) return;
@@ -792,6 +830,7 @@ public class KioskActivity extends Activity implements Core.Host {
     protected void onNewIntent(Intent i) {
         super.onNewIntent(i);
         if (i != null && i.getBooleanExtra("reload_url", false)) loadConfiguredUrl();
+        if (i != null && i.getBooleanExtra(EXTRA_WAKE, false)) turnScreenOnNow();
     }
 
     @Override

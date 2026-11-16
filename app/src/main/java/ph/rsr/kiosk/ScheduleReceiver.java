@@ -9,6 +9,7 @@ public class ScheduleReceiver extends BroadcastReceiver {
     static final String ACTION_MAINT_END = "ph.rsr.kiosk.MAINT_END";
     static final String ACTION_REPORT_WAKE = "ph.rsr.kiosk.REPORT_WAKE";
     static final String ACTION_UPDATE = "ph.rsr.kiosk.UPDATE";
+    static final String ACTION_CHECKIN = "ph.rsr.kiosk.CHECKIN";
 
     @Override
     public void onReceive(Context c, Intent i) {
@@ -16,6 +17,7 @@ public class ScheduleReceiver extends BroadcastReceiver {
         if (ACTION_MAINT_END.equals(i.getAction())) core.maintenanceAlarm();
         else if (ACTION_REPORT_WAKE.equals(i.getAction())) core.reportWake();
         else if (ACTION_UPDATE.equals(i.getAction())) core.updateAlarm();
+        else if (ACTION_CHECKIN.equals(i.getAction())) core.checkinAlarm();
         else core.scheduleAlarm();
     }
 }

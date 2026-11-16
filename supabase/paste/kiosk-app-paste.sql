@@ -91,6 +91,7 @@ alter table public.kiosk_app_devices add column if not exists sim_provider      
 alter table public.kiosk_app_devices add column if not exists sim_close_days    integer;
 alter table public.kiosk_app_devices add column if not exists sim_alerts        jsonb not null default '{}'::jsonb;
 alter table public.kiosk_app_devices add column if not exists load_wait_from    timestamptz;
+alter table public.kiosk_app_devices add column if not exists battery_unrestricted boolean;
 create table if not exists public.kiosk_app_conn (
   id          bigserial primary key,
   device_id   text not null,
@@ -286,6 +287,7 @@ begin
     sim_operator    = case when p ? 'sim_operator' then nullif(left(regexp_replace(coalesce(p->>'sim_operator',''), '[^[:alnum:] ._-]', '', 'g'), 40), '') else k.sim_operator end,
     sim_state       = case when p->>'sim_state' in ('ready','absent','locked','unknown') then p->>'sim_state' else k.sim_state end,
     sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
+    battery_unrestricted = case when jsonb_typeof(p->'battery_unrestricted') = 'boolean' then (p->>'battery_unrestricted')::boolean else k.battery_unrestricted end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -453,6 +455,7 @@ begin
                         from (select * from public.kiosk_app_events e2 where e2.device_id = k.device_id
                                order by e2.at desc limit 5) e)
          ) || jsonb_build_object(
+           'battery_unrestricted', k.battery_unrestricted,
            'net', jsonb_build_object('type', k.net_type, 'since', k.net_since, 'mobile_signal', k.mobile_signal, 'mobile_ok', k.mobile_ok,
                     'down_today_min', public.kiosk_app_down_min(k.device_id, (date_trunc('day', now() at time zone 'Asia/Manila')) at time zone 'Asia/Manila'),
                     'down_7d_min', public.kiosk_app_down_min(k.device_id, now() - interval '7 days'),
@@ -1156,4 +1159,4 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
           and proname in ('kiosk_app_sms_put','kiosk_app_load_add','kiosk_app_load_wait','kiosk_app_sim_set','kiosk_app_load_shot_get','kiosk_app_sim_info')) as build6_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
-                              'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from')) as build6_columns;
+                              'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;

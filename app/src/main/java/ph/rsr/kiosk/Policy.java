@@ -60,6 +60,10 @@ final class Policy {
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         run("perm mic", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.RECORD_AUDIO,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
+        // build-6: telco texts on the SIM (load / expiry). Android may refuse this restricted permission for an app
+        // installed by the self-updater; the tablet then reports sms_ok=false and the office uses screenshots.
+        run("perm sms", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.RECEIVE_SMS,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         // System updates only 00:30 - 04:30 so Samsung never restarts the tablet during work or overtime.
         run("updates", () -> d.setSystemUpdatePolicy(a, SystemUpdatePolicy.createWindowedInstallPolicy(30, 4 * 60 + 30)));
     }

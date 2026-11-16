@@ -15,6 +15,9 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.TURN_SCREEN_ON" />
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- build-6: add the yard Wi-Fi from the office (device owner); read telco texts on the SIM (load / expiry) -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <!-- KeepAlive: stay in the foreground class so Android never freezes the app or cuts its network -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -44,7 +47,7 @@
             android:launchMode="singleTask"
             android:lockTaskMode="if_whitelisted"
             android:screenOrientation="unspecified"
-            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|smallestScreenSize|uiMode|density"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|smallestScreenSize|uiMode|density|mcc|mnc|locale|layoutDirection|fontScale|touchscreen|colorMode"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:windowSoftInputMode="adjustResize">
@@ -126,6 +129,16 @@
         <receiver
             android:name=".InstallReceiver"
             android:exported="false" />
+
+            <!-- build-6: telco texts (load / expiry / low data) for the office; a person's text is never kept -->
+        <receiver
+            android:name=".SmsReceiver"
+            android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>
