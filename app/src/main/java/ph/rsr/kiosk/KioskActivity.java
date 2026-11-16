@@ -667,7 +667,9 @@ public class KioskActivity extends Activity implements Core.Host {
                 .setTitle("RSR Kiosk settings")
                 .setView(box.view)
                 .setPositiveButton("Open", (d, w) -> {
-                    if (prefs.checkPasscode(box.text())) {
+                    if (box.text().isEmpty()) {
+                        askPasscode();   // Open on an empty box: not a wrong try, just ask again
+                    } else if (prefs.checkPasscode(box.text())) {
                         prefs.passcodeOk();
                         startActivity(new Intent(this, SettingsActivity.class));
                     } else {
