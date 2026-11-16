@@ -31,5 +31,5 @@ jobs:
           run $S/Awake.java test/AwakeTest.java
           run $S/PasscodeText.java test/PasscodeTextTest.java
           run $S/TelcoText.java test/TelcoTextTest.java
-      - name: Compile the app
-        run: gradle :app:compileDebugJavaWithJavac --no-daemon --stacktrace
+      - name: Build the app (debug, not published)
+        run: gradle :app:assembleDebug --no-daemon --stacktrace   # full debug build (manifest + dex), debug key only, never published
