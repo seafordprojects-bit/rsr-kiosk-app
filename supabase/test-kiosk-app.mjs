@@ -472,17 +472,26 @@ let K=(await q(`select kind from kiosk_app_sms where device_id=$1 order by id`,[
 ok(K==='load,load,expiring,expired,low,other,other,other','texts sorted; freebie, ad and pasaload are "other" ('+K+')');
 ok((await q(`select count(*)::int n from kiosk_app_loads where device_id=$1`,[B6]))[0].n===2,'freebie / pasaload never become a load');
 ok((await q(`select body from kiosk_app_sms where body like '%Pasaload%'`))[0].body.includes('09*********') ,'a person\'s number inside a telco text is masked');
-await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+// instant (owner 2026-11-16): the Telegram goes out inside kiosk_app_sms_put, no tick needed
 let SM=(await q(`select msg from sent order by id`)).map(x=>x.msg);
-ok(SM.some(m=>m.includes('LOAD RECEIVED (GOMOscript text') && m.includes(': 25 GB, expires')),'Telegram: load received with GB');
+ok(SM.some(m=>m.includes('LOAD RECEIVED (GOMOscript text') && m.includes(': 25 GB, expires')),'Telegram: load received with GB, at once (no tick)');
 ok(SM.some(m=>m.includes('(EXPIRED,')) && SM.some(m=>m.includes('(expiring,')) && SM.some(m=>m.includes('(data low,')),'Telegram: expired / expiring / low texts');
 ok(!SM.some(m=>m.includes('SHOPEE') || m.includes('11.11') || m.includes('50GB') || m.includes('FREE') || m.includes('Pasaload')),'ads, freebies, pasaload never sent to Telegram');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
-ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes(' text (')),'texts sent once');
-// OTP for the telco app: on the Tablets page 15 min, never Telegram, never a load, then deleted
+ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes(' text (') || x.msg.includes('LOAD RECEIVED')),'texts sent once (tick never resends)');
+// leftover: a text that was stored but not yet sent (e.g. older server) goes out on the next tick, once
+await q(`insert into kiosk_app_sms (device_id, sender, body, received_at, kind) values ($1,'GOMO','Your data is running low. Only 100MB left.', now(), 'low')`,[B6]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('Only 100MB')).length===1,'leftover text sent by the tick, once');
+ok((await q(`select public.kiosk_app_sms_alert(id) r from kiosk_app_sms where body like '%Only 100MB%'`))[0].r===false,'alert on an already-sent text does nothing');
+// OTP for the telco app: Telegram AT ONCE (owner 2026-11-16), on the Tablets page 15 min, never a load, then deleted
+await q(`delete from sent`);
 await sms('DITO','Your DITO OTP is 482913. Do not share this code with anyone.');
-await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
-ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes('482913')),'OTP never sent to Telegram');
+let OT=(await q(`select msg from sent`)).map(x=>x.msg).filter(m=>m.includes('482913'));
+ok(OT.length===1 && OT[0].includes('CODE: 482913'),'OTP sent to Telegram at once with the code ('+OT[0]+')');
+await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).filter(x=>x.msg.includes('482913')).length===1,'OTP sent once (tick never resends)');
+ok((await sms('DITO','Your DITO OTP is 482913. Do not share this code with anyone.')).duplicate===true && (await q(`select msg from sent`)).filter(x=>x.msg.includes('482913')).length===1,'app re-send of the same OTP: no second Telegram');
 let SI=(await q(`select public.kiosk_app_sim_info($1) r`,[B6]))[0].r;
 ok(SI.otp && SI.otp.code==='482913' && !SI.texts.some(x=>x.body.includes('482913')),'OTP shown on its own on the SIM card');
 await q(`update kiosk_app_sms set created_at=now()-interval '16 minutes' where body like '%482913%'`); await q(`select public.kiosk_app_tick()`);

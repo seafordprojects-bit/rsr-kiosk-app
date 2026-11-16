@@ -23,6 +23,8 @@ drop function if exists public.kiosk_app_shot_get(text, text);
 drop table if exists public.kiosk_app_shots;
 -- build-6
 drop function if exists public.kiosk_app_sms_put(text, text, text, text, text);
+drop function if exists public.kiosk_app_sms_alert(bigint);
+drop function if exists public.kiosk_app_otp_code(text);
 drop function if exists public.kiosk_app_load_add(text, text, jsonb);
 drop function if exists public.kiosk_app_load_wait(text, text);
 drop function if exists public.kiosk_app_sim_set(text, text, text, integer);

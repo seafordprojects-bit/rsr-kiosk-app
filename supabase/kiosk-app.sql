@@ -572,8 +572,7 @@ begin
                 from (select * from public.kiosk_app_sms y where y.device_id = p_device and y.kind <> 'otp'
                        order by y.received_at desc limit 5) x),
     'otp', (select jsonb_build_object('from', x.sender, 'body', x.body, 'at', x.created_at,
-                                      'code', coalesce((regexp_match(x.body, '(otp|one-?time (pin|password|code)|verification code|security code|\mcode|\mpin)[^0-9]{0,25}\m([0-9]{4,8})\M', 'i'))[3],
-                                                       (regexp_match(x.body, '\m([0-9]{4,8})\M[^0-9]{0,6}(is|as) your', 'i'))[1]))
+                                      'code', public.kiosk_app_otp_code(x.body))
               from public.kiosk_app_sms x where x.device_id = p_device and x.kind = 'otp'
                and x.created_at > now() - interval '15 minutes' order by x.created_at desc limit 1));
 end $$;
@@ -714,9 +713,53 @@ end $$;
 revoke all on function public.kiosk_app_shot_get(text, text) from public;
 grant execute on function public.kiosk_app_shot_get(text, text) to anon, authenticated;
 
+-- Instant Telegram for a telco text (owner 2026-11-16: "load receiver and the OTP ... instant"). Called by
+-- kiosk_app_sms_put the moment the tablet hands the text over; the 5-min tick only picks up leftovers.
+-- notified is claimed first (update ... where not notified), so a text is never sent twice.
+create or replace function public.kiosk_app_otp_code(p_body text)
+returns text language sql immutable set search_path = public as $$
+  select coalesce((regexp_match(p_body, '(otp|one-?time (pin|password|code)|verification code|security code|\mcode|\mpin)[^0-9]{0,25}\m([0-9]{4,8})\M', 'i'))[3],
+                  (regexp_match(p_body, '\m([0-9]{4,8})\M[^0-9]{0,6}(is|as) your', 'i'))[1])
+$$;
+revoke all on function public.kiosk_app_otp_code(text) from public, anon, authenticated;
+
+create or replace function public.kiosk_app_sms_alert(p_id bigint)
+returns boolean language plpgsql volatile security definer set search_path = public as $$
+declare
+  tx record;
+  l  public.kiosk_app_loads%rowtype;
+  v_t text;
+begin
+  update public.kiosk_app_sms x set notified = true where x.id = p_id and not x.notified;
+  if not found then return false; end if;   -- already sent (or being sent) by someone else
+  select x.id, x.kind, x.body, x.received_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
+         coalesce(k.sim_provider, k.sim_operator, x.sender) as prov
+    into tx
+    from public.kiosk_app_sms x left join public.kiosk_app_devices k on k.device_id = x.device_id
+   where x.id = p_id;
+  if tx.kind = 'other' or tx.received_at < now() - interval '2 days' then return false; end if;
+  v_t := to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM');
+  if tx.kind = 'otp' then
+    perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' CODE: '
+            || coalesce(public.kiosk_app_otp_code(tx.body), '(see text)') || '  (' || v_t
+            || '). Use it now - it expires in a few minutes. Text: "' || left(tx.body, 200) || '"');
+  elsif tx.kind = 'load' then
+    select * into l from public.kiosk_app_loads x where x.id = tx.load_id;
+    perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - LOAD RECEIVED (' || tx.prov || ' text, ' || v_t || ')'
+            || coalesce(': ' || trim_scale(l.gb) || ' GB', '') || coalesce(', expires ' || to_char(l.expires_on, 'Mon DD, YYYY'), '')
+            || '. Recorded. Text: "' || left(tx.body, 200) || '"');
+  else
+    perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' text ('
+            || case tx.kind when 'expired' then 'EXPIRED' when 'expiring' then 'expiring' else 'data low' end || ', '
+            || v_t || '): "' || left(tx.body, 200) || '"');
+  end if;
+  return true;
+end $$;
+revoke all on function public.kiosk_app_sms_alert(bigint) from public, anon, authenticated;
+
 -- STEP 5d - BUILD-6 telco texts. The app sends ONLY texts from telco names / short codes (never from a
 -- personal mobile number). A load text is recorded as a load by itself; the rest are kept for the
--- Tablets page, and expiring / expired / low ones go to Telegram (kiosk_app_tick).
+-- Tablets page. Load / expiring / expired / low texts and OTP codes go to Telegram AT ONCE (kiosk_app_sms_alert).
 create or replace function public.kiosk_app_sms_put(p_device text, p_token text, p_sender text, p_body text, p_at text)
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
 declare
@@ -759,6 +802,8 @@ begin
     returning id into v_load;
     update public.kiosk_app_sms x set load_id = v_load where x.id = v_id;
   end if;
+  -- Telegram at once (load / expiry / low / OTP); the send is queued by pg_net and never fails this call
+  perform public.kiosk_app_sms_alert(v_id);
   return jsonb_build_object('ok', true);
 end $$;
 revoke all on function public.kiosk_app_sms_put(text, text, text, text, text) from public;
@@ -1409,28 +1454,11 @@ begin
     update public.kiosk_app_events set notified = true where id = e.id;
   end loop;
 
-  -- BUILD-6 telco texts: load received / expiring / expired / low go to Telegram (at most 5 per tick); others stay on the page
+  -- BUILD-6 telco texts: normally sent at once by kiosk_app_sms_put; the tick only sends leftovers (at most 5)
   v_sent := 0;
-  for tx in select x.id, x.kind, x.body, x.received_at, x.load_id, coalesce(nullif(k.name,''), x.device_id) as nm,
-                  coalesce(k.sim_provider, k.sim_operator, x.sender) as prov
-             from public.kiosk_app_sms x left join public.kiosk_app_devices k on k.device_id = x.device_id
-            where not x.notified order by x.received_at loop
-    if tx.kind not in ('other', 'otp') and tx.received_at > now() - interval '2 days' then
-      v_sent := v_sent + 1;
-      exit when v_sent > 5;
-      if tx.kind = 'load' then
-        select * into l from public.kiosk_app_loads x where x.id = tx.load_id;
-        perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - LOAD RECEIVED (' || tx.prov || ' text, '
-                || to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM') || ')'
-                || coalesce(': ' || trim_scale(l.gb) || ' GB', '') || coalesce(', expires ' || to_char(l.expires_on, 'Mon DD, YYYY'), '')
-                || '. Recorded. Text: "' || left(tx.body, 200) || '"');
-      else
-        perform public.kiosk_alert_send('RSR Kiosk: ' || tx.nm || ' - ' || tx.prov || ' text ('
-                || case tx.kind when 'expired' then 'EXPIRED' when 'expiring' then 'expiring' else 'data low' end || ', '
-                || to_char(tx.received_at at time zone 'Asia/Manila', 'Mon DD HH12:MI AM') || '): "' || left(tx.body, 200) || '"');
-      end if;
-    end if;
-    update public.kiosk_app_sms set notified = true where id = tx.id;
+  for tx in select x.id from public.kiosk_app_sms x where not x.notified order by x.received_at limit 50 loop
+    exit when v_sent >= 5;
+    if public.kiosk_app_sms_alert(tx.id) then v_sent := v_sent + 1; end if;
   end loop;
   -- a Wi-Fi password never waits on the server longer than the command itself (30 min)
   update public.kiosk_app_devices set cmd_arg = null
