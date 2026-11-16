@@ -401,7 +401,15 @@ begin
                                                 else interval '60 seconds' end)
      and (select count(*) from public.kiosk_app_events x
            where x.device_id = v_id and x.at > now() - interval '1 hour') < 20 then
-    insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
+    -- a phone call to the tablet: Telegram AT ONCE from here, not at the next 5-minute tick (owner 2026-11-16:
+    -- the call is his backup way to reach the kiosk, a few minutes' wait is too long)
+    if v_ev = 'screen woken by phone call' then
+      insert into public.kiosk_app_events (device_id, event, notified) values (v_id, v_ev, true);
+      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - screen woken by your phone call. ('
+              || to_char(now() at time zone 'Asia/Manila', 'HH12:MI:SS AM') || ')');
+    else
+      insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
+    end if;
   end if;
 
   -- DRAIN LEARNING. A measurement runs while the tablet is on battery with the screen in one state.
