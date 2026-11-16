@@ -215,12 +215,32 @@ final class Core {
         PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
         boolean asleep = pm != null && !pm.isInteractive();
         if (!asleep || plugged()) return;   // screen on or on the charger: the normal 1-minute loop is running
+        if (batteryPct() >= 0 && batteryPct() <= 20) return;   // low battery: keep it for the morning punches
+        final PowerManager.WakeLock wl;
         try {
-            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:checkin").acquire(45_000L);
-        } catch (Exception ignored) { }
+            wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rsr:checkin");
+            wl.setReferenceCounted(false);
+            wl.acquire(45_000L);
+        } catch (Exception e) {
+            return;
+        }
         bg.postDelayed(this::beat, 12_000);         // Wi-Fi reconnects from sleep first
         bg.postDelayed(this::sendTexts, 14_000);
-        bg.postDelayed(this::beat, 35_000);         // second try (and picks up a command sent meanwhile)
+        bg.postDelayed(() -> {                      // second try (and picks up a command sent meanwhile), then sleep again
+            beat();
+            try { if (wl.isHeld()) wl.release(); } catch (Exception ignored) { }
+        }, 32_000);
+    }
+
+    private int batteryPct() {
+        try {
+            Intent b = ctx.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (b == null) return -1;
+            int lvl = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), sc = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100);
+            return lvl >= 0 && sc > 0 ? Math.round(lvl * 100f / sc) : -1;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     // ---- build-6: telco texts to the office ------------------------------------------------------
@@ -240,8 +260,8 @@ final class Core {
                 String resp = Net.rpc("kiosk_app_sms_put", b.toString());
                 JSONObject r = resp.trim().startsWith("{") ? new JSONObject(resp) : new JSONObject();
                 String err = r.optString("error", "");
-                if (err.equals("token") || err.startsWith("too many")) return;   // keep; try again later
-                TextQueue.removeFirst(ctx, at, body);                               // sent (or not storable: empty)
+                if (err.equals("token")) return;                                    // keep; try again later
+                TextQueue.removeFirst(ctx, at, body);   // sent, or refused for good (empty / over 40 a day = spam)
             } catch (Exception e) {
                 return;   // offline: kept on the tablet, sent with a later report
             }
@@ -389,7 +409,7 @@ final class Core {
     }
 
     private void runCommand(String cmd, String arg, long id) {
-        Log.i(TAG, "command " + cmd + " " + arg);
+        Log.i(TAG, "command " + cmd + ("set_wifi".equals(cmd) ? "" : " " + arg));   // never the Wi-Fi password
         switch (cmd) {
             case "reload":
             case "hard_reload": {

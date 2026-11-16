@@ -62,6 +62,11 @@ final class Policy {
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         // build-6: telco texts on the SIM (load / expiry). Android may refuse this restricted permission for an app
         // installed by the self-updater; the tablet then reports sms_ok=false and the office uses screenshots.
+        // build-6 Set Wi-Fi: reading the saved networks (to switch back if a new Wi-Fi fails) needs location permission
+        run("perm loc", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.ACCESS_FINE_LOCATION,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
+        run("perm loc2", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.ACCESS_COARSE_LOCATION,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         run("perm sms", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.RECEIVE_SMS,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         // System updates only 00:30 - 04:30 so Samsung never restarts the tablet during work or overtime.

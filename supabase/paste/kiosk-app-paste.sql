@@ -4,6 +4,7 @@ select extname from pg_extension where extname in ('pg_cron','pg_net');
 select to_regprocedure('public.kiosk_alert_send(text)')       as alert_send,
        to_regprocedure('public.admin_verify_passcode(text)')  as admin_verify,
        to_regclass('public.kiosk_app_devices')                as devices_before;
+select tgname from pg_trigger where tgrelid = to_regclass('public.kiosk_app_devices') and not tgisinternal;
 create table if not exists public.kiosk_app_devices (
   device_id         text primary key,
   name              text,
@@ -155,12 +156,12 @@ revoke all on function public.kiosk_app_ts(text) from public, anon, authenticate
 create or replace function public.kiosk_app_sms_kind(p_body text)
 returns text language sql immutable as $$
   select case
-    when p_body ~* '(has expired|have expired|is expired|already expired|expired na|nag-?expire na)' then 'expired'
-    when p_body ~* '(you have (successfully )?(registered|subscribed|purchased|bought|loaded)|successfully (registered|subscribed|purchased|loaded|reloaded)|registration .*successful|you are now (registered|subscribed)|has been (credited|added|loaded)|load (of|worth) .*received|you received|thank you for (loading|purchasing|subscribing|registering))'
+    when p_body ~* '(\mfree\M|freebie|\mbonus\M|\mgift|pasaload|share-?a-?load|from (\+?63|0)9[0-9]|\mdial\M|\*[0-9]{2,4}#|register now|avail now|\mget [0-9]+\s*gb|\mbuy now|\moffer\M|limited time|until supplies)' then 'other'
+    when p_body ~* '\myour\M[^.]{0,80}(has expired|have expired|is expired|already expired|expired na|nag-?expire na)' then 'expired'
+    when p_body ~* '(you have (successfully )?(registered|subscribed|purchased|bought|loaded|reloaded)|successfully (registered|subscribed|purchased|loaded|reloaded)|registration .*successful|you are now (registered|subscribed)|thank you for (loading|reloading|purchasing|subscribing|registering))'
          and p_body ~* '([0-9]+(\.[0-9]+)?\s*(gb|mb)|data|valid|day|expir|promo)' then 'load'
-    when p_body ~* '(will expire|expiring|expires (on|in|today|tomorrow)|valid until|valid till)'
-         and p_body !~* '(you have (successfully )?(registered|subscribed|purchased)|successfully)' then 'expiring'
-    when p_body ~* '(running low|is low|low data|only [0-9.]+\s*(gb|mb).* left|remaining (data|balance).* [0-9.]+\s*(gb|mb)|used up|consumed)' then 'low'
+    when p_body ~* '\myour\M[^.]{0,80}(will expire|expiring|expires (on|in|today|tomorrow)|valid until|valid till)' then 'expiring'
+    when p_body ~* '\myour\M[^.]{0,80}(running low|is low|low data|only [0-9.]+\s*(gb|mb).* left|remaining (data|balance).* [0-9.]+\s*(gb|mb)|used up|consumed)' then 'low'
     else 'other' end
 $$;
 revoke all on function public.kiosk_app_sms_kind(text) from public, anon, authenticated;
@@ -363,7 +364,8 @@ begin
     end loop;
   end if;
   if d.cmd_id is not null and d.cmd_id > coalesce(d.cmd_done_id, 0)
-     and d.cmd_at > now() - interval '30 minutes' then
+     and d.cmd_at > now() - interval '30 minutes'
+     and (d.cmd <> 'set_wifi' or d.token_confirmed) then
     return jsonb_build_object('cmd_id', d.cmd_id, 'cmd', d.cmd, 'arg', coalesce(d.cmd_arg,''))
            || case when v_new is not null then jsonb_build_object('token', v_new) else '{}'::jsonb end;
   end if;
@@ -399,9 +401,12 @@ revoke all on function public.kiosk_app_forget(text, text) from public;
 grant execute on function public.kiosk_app_forget(text, text) to anon, authenticated;
 create or replace function public.kiosk_app_down_min(p_device text, p_from timestamptz)
 returns integer language sql stable as $$
-  select coalesce(round(sum(extract(epoch from (least(coalesce(c.ended_at, now()), now()) - greatest(c.started_at, p_from))) / 60.0))::int, 0)
-    from public.kiosk_app_conn c
-   where c.device_id = p_device and coalesce(c.ended_at, now()) > p_from
+  select coalesce(round(sum(extract(epoch from (upper(r) - lower(r)))) / 60.0)::int, 0)
+    from (select unnest(range_agg(tstzrange(greatest(c.started_at, p_from), e.t))) r
+            from public.kiosk_app_conn c
+            cross join lateral (select least(coalesce(c.ended_at,
+                     (select d.last_seen + interval '2 minutes' from public.kiosk_app_devices d where d.device_id = c.device_id), now()), now()) t) e
+           where c.device_id = p_device and e.t > greatest(c.started_at, p_from)) x
 $$;
 revoke all on function public.kiosk_app_down_min(text, timestamptz) from public, anon, authenticated;
 create or replace function public.kiosk_app_sim_info(p_device text)
@@ -550,7 +555,8 @@ create or replace function public.kiosk_app_sms_put(p_device text, p_token text,
 returns jsonb language plpgsql volatile security definer set search_path = public as $$
 declare
   v_from text := left(regexp_replace(btrim(coalesce(p_sender,'')), '[^[:alnum:] ._+-]', '', 'g'), 20);
-  v_body text := left(regexp_replace(btrim(coalesce(p_body,'')), '[<>]', '', 'g'), 1000);
+  v_body text := left(regexp_replace(regexp_replace(btrim(coalesce(p_body,'')), '[<>]', '', 'g'),
+                      '(\+?63|0)?9[0-9]{2}[ -]?[0-9]{3}[ -]?[0-9]{4}', '09*********', 'g'), 1000);
   v_at   timestamptz := coalesce(public.kiosk_app_ts(p_at), now());
   v_kind text;
   v_id   bigint;
@@ -561,7 +567,9 @@ begin
   select * into d from public.kiosk_app_devices k where k.device_id = p_device and k.token is not null and k.token = p_token;
   if not found then return jsonb_build_object('error', 'token'); end if;
   if v_from = '' or v_body = '' then return jsonb_build_object('error', 'empty'); end if;
-  if regexp_replace(v_from, '[ +-]', '', 'g') ~ '^[0-9]{10,13}$' then return jsonb_build_object('ok', true, 'ignored', true); end if;
+  if not (v_from ~* '(dito|gomo|globe|\mtm\M|smart|\mtnt\M|\msun\M)' or v_from ~ '^[0-9]{3,5}$') then
+    return jsonb_build_object('ok', true, 'ignored', true);
+  end if;
   if v_at > now() or v_at < now() - interval '11 days' then v_at := now(); end if;
   if exists (select 1 from public.kiosk_app_sms x where x.device_id = p_device and x.sender = v_from and x.body = v_body
                and x.received_at between v_at - interval '10 minutes' and v_at + interval '10 minutes') then
@@ -998,7 +1006,8 @@ begin
               || ' Battery ' || coalesce(r.battery::text,'?') || '%.');
       update public.kiosk_app_devices set offline_first_at = null where device_id = r.device_id;
     end if;
-    if r.net_type = 'mobile' and r.net_since < now() - interval '30 minutes' and not r.mobile_alerted then
+    if r.net_type = 'mobile' and r.net_since < now() - interval '30 minutes' and not r.mobile_alerted
+       and v_work and public.kiosk_app_power_state(r.power_windows, v_min) = 'on' then
       perform public.kiosk_alert_send('RSR Kiosk: ' || v_name || ' is on MOBILE DATA for ' || public.kiosk_app_dur(now() - r.net_since)
               || ' - the yard Wi-Fi may be down. Punches still sync.'
               || coalesce(' Mobile data used today: ' || (select round(x.bytes / 1048576.0) from public.kiosk_app_data_days x
@@ -1102,10 +1111,12 @@ begin
             order by ev.at loop
     if e.event like 'tablet restarted%' or e.event like 'updated to build%'
        or e.event like 'maintenance opened%' or e.event like 'update install failed%'
-       or e.event like 'installing build%' then
+       or e.event like 'installing build%' or e.event = 'screen on failed' then
       v_sent := v_sent + 1;
       exit when v_sent > 5;
-      perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - ' || e.event || ' ('
+      perform public.kiosk_alert_send('RSR Kiosk: ' || e.nm || ' - '
+              || case when e.event = 'screen on failed' then 'screen did NOT turn on by itself. Press the power button; check the Tablets page.'
+                      else e.event end || ' ('
               || to_char(e.at at time zone 'Asia/Manila', 'HH12:MI AM') || ')');
     end if;
     update public.kiosk_app_events set notified = true where id = e.id;
@@ -1138,6 +1149,10 @@ begin
   delete from public.kiosk_app_devices where coalesce(name, '') = '' and last_seen < now() - interval '7 days';
   delete from public.kiosk_app_shots s where not exists (select 1 from public.kiosk_app_devices d where d.device_id = s.device_id);
   delete from public.kiosk_app_conn where coalesce(ended_at, now()) < now() - interval '60 days';
+  delete from public.kiosk_app_conn c where not exists (select 1 from public.kiosk_app_devices d where d.device_id = c.device_id) and c.started_at < now() - interval '30 days';
+  delete from public.kiosk_app_sms x where not exists (select 1 from public.kiosk_app_devices d where d.device_id = x.device_id) and x.received_at < now() - interval '30 days';
+  delete from public.kiosk_app_data_days x where not exists (select 1 from public.kiosk_app_devices d where d.device_id = x.device_id) and x.day < v_today - 30;
+  delete from public.kiosk_app_load_shots x where not exists (select 1 from public.kiosk_app_devices d where d.device_id = x.device_id);
   delete from public.kiosk_app_data_days where day < v_today - 400;
   delete from public.kiosk_app_sms where received_at < now() - interval '180 days' and load_id is null;
 end $$;

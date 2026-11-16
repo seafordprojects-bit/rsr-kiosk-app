@@ -462,14 +462,20 @@ ok((await q(`select expires_on::text e, gb from kiosk_app_loads where device_id=
 await sms('GOMO','Your data promo will expire on 12/20/2026. Reload now to keep surfing.');
 await sms('GOMO','Your GO+99 promo has expired. Reload now.');
 await sms('GOMO','Your data is running low. Only 500MB left.');
-await sms('SHOPEE','11.11 sale! Free shipping');
+ok((await sms('SHOPEE','11.11 sale! Free shipping')).ignored===true,'shop sender never stored');
+ok((await sms('GCash','Your OTP is 123456')).ignored===true,'GCash / bank code never stored');
+await sms('GOMO','Congrats! You received 1GB FREE data valid for 3 days.');
+await sms('8080','Get 50GB! Promo valid until Nov 30, 2026. Dial *143# now.');
+await sms('DITO','You received P50 load from 09171234567 via Pasaload.');
 let K=(await q(`select kind from kiosk_app_sms where device_id=$1 order by id`,[B6])).map(x=>x.kind).join(',');
-ok(K==='load,load,expiring,expired,low,other','texts sorted: load, load, expiring, expired, low, other ('+K+')');
+ok(K==='load,load,expiring,expired,low,other,other,other','texts sorted; freebie, ad and pasaload are "other" ('+K+')');
+ok((await q(`select count(*)::int n from kiosk_app_loads where device_id=$1`,[B6]))[0].n===2,'freebie / pasaload never become a load');
+ok((await q(`select body from kiosk_app_sms where body like '%Pasaload%'`))[0].body.includes('09*********') ,'a person\'s number inside a telco text is masked');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 let SM=(await q(`select msg from sent order by id`)).map(x=>x.msg);
 ok(SM.some(m=>m.includes('LOAD RECEIVED (GOMOscript text') && m.includes(': 25 GB, expires')),'Telegram: load received with GB');
 ok(SM.some(m=>m.includes('(EXPIRED,')) && SM.some(m=>m.includes('(expiring,')) && SM.some(m=>m.includes('(data low,')),'Telegram: expired / expiring / low texts');
-ok(!SM.some(m=>m.includes('SHOPEE') || m.includes('11.11')),'promo spam never sent to Telegram');
+ok(!SM.some(m=>m.includes('SHOPEE') || m.includes('11.11') || m.includes('50GB') || m.includes('FREE') || m.includes('Pasaload')),'ads, freebies, pasaload never sent to Telegram');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
 ok(!(await q(`select msg from sent`)).some(x=>x.msg.includes(' text (')),'texts sent once');
 // parser edge cases
@@ -571,6 +577,23 @@ ok((await q(`select cmd_arg from kiosk_app_devices where device_id=$1`,[B6]))[0]
 R=(await q(`select public.kiosk_app_command('123456',$1,'retry_punches','') r`,[B6]))[0].r; ok(R.ok,'Retry stuck punches command accepted');
 await beat({device_id:B6,battery:90,charging:true,page_url:MAN,event:'screen on failed'});
 ok((await q(`select count(*)::int n from kiosk_app_events where device_id=$1 and event='screen on failed'`,[B6]))[0].n===1,'"screen on failed" event logged');
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok((await q(`select msg from sent`)).some(x=>x.msg.includes('screen did NOT turn on by itself')),'"screen on failed" goes to Telegram');
+// downtime: an outage reported for time already on mobile data is counted once
+await q(`delete from kiosk_app_conn where device_id=$1`,[B6]);
+await q(`insert into kiosk_app_conn(device_id,kind,started_at,ended_at) values ($1,'mobile',now()-interval '3 hours',now()-interval '10 minutes'),($1,'offline',now()-interval '2 hours 10 minutes',now()-interval '10 minutes')`,[B6]);
+ok((await q(`select public.kiosk_app_down_min($1, now()-interval '1 day') m`,[B6]))[0].m===170,'overlapping periods counted once (170 min)');
+// an open mobile period of a silent tablet stops counting 2 min after its last report
+await q(`delete from kiosk_app_conn where device_id=$1`,[B6]);
+await q(`insert into kiosk_app_conn(device_id,kind,started_at) values ($1,'mobile',now()-interval '5 hours')`,[B6]);
+await q(`update kiosk_app_devices set last_seen=now()-interval '4 hours' where device_id=$1`,[B6]);
+ok((await q(`select public.kiosk_app_down_min($1, now()-interval '1 day') m`,[B6]))[0].m===62,'silent tablet: open period stops at last report + 2 min');
+await q(`delete from kiosk_app_conn where device_id=$1`,[B6]); await q(`update kiosk_app_devices set last_seen=now() where device_id=$1`,[B6]);
+// a Wi-Fi password is only handed to a tablet that confirmed its secret
+await q(`select public.kiosk_app_command('123456',$1,'set_wifi',$2)`,[B6,JSON.stringify({ssid:'X1',pass:'abcdefgh'})]);
+await q(`update kiosk_app_devices set token_confirmed=false where device_id=$1`,[B6]);
+ok(JSON.stringify(await beat({device_id:B6,battery:90,charging:true,page_url:MAN,token:''})).indexOf('abcdefgh')<0,'unconfirmed tablet never receives a Wi-Fi password');
+await q(`update kiosk_app_devices set token_confirmed=true, cmd=null, cmd_arg=null where device_id=$1`,[B6]);
 // forget removes build-6 rows too? (kept: loads are history) - tick cleanup keeps loads
 await q(`delete from sent`);
 }

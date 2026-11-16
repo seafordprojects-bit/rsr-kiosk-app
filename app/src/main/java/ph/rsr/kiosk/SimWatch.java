@@ -54,7 +54,7 @@ final class SimWatch {
                     }
                 }
             }
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
         try {
             TelephonyManager tm = (TelephonyManager) ctx.getSystemService(Context.TELEPHONY_SERVICE);
             if (tm != null) {
@@ -66,40 +66,40 @@ final class SimWatch {
                 String op = tm.getSimOperatorName();
                 if (op == null || op.trim().isEmpty()) op = tm.getNetworkOperatorName();
                 p.put("sim_operator", op == null ? "" : op.trim());
-                if (st == TelephonyManager.SIM_STATE_READY) {
+                if (st == TelephonyManager.SIM_STATE_READY && android.os.Build.VERSION.SDK_INT >= 28) {
                     try {
                         SignalStrength ss = tm.getSignalStrength();
                         if (ss != null) p.put("mobile_signal", Math.max(0, Math.min(4, ss.getLevel())));
-                    } catch (Exception ignored) { }
+                    } catch (Throwable ignored) { }
                 }
             }
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
         try {
             // granted AND really allowed: Android can show a restricted permission as granted while its app-op
             // still blocks the texts (app not allow-listed by its installer) - then the office must know
             boolean perm = ctx.checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED;
             boolean op = true;
-            try {
+            if (android.os.Build.VERSION.SDK_INT >= 29) try {
                 android.app.AppOpsManager ao = (android.app.AppOpsManager) ctx.getSystemService(Context.APP_OPS_SERVICE);
                 if (ao != null) op = ao.unsafeCheckOpNoThrow("android:receive_sms", android.os.Process.myUid(), ctx.getPackageName())
                         == android.app.AppOpsManager.MODE_ALLOWED;
-            } catch (Exception ignored) { }
+            } catch (Throwable ignored) { }
             p.put("sms_ok", perm && op);
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
         try {
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
             if (pm != null) p.put("battery_unrestricted", pm.isIgnoringBatteryOptimizations(ctx.getPackageName()));
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
         try {
             JSONObject d = mobileDays(ctx);
             if (d != null && d.length() > 0) p.put("mobile_days", d);
-        } catch (Exception ignored) { }
+        } catch (Throwable ignored) { }
     }
 
     /** {"2026-11-16": bytes, ...} for today and the 2 days before. Cached 15 min. */
     private static synchronized JSONObject mobileDays(Context ctx) {
         long now = System.currentTimeMillis();
-        if (lastDays != null && now - lastDaysAt < 15 * 60_000L) return lastDays;
+        if (now - lastDaysAt < 15 * 60_000L) return lastDays;   // also a failed read waits 15 min
         lastDaysAt = now;
         try {
             NetworkStatsManager ns = (NetworkStatsManager) ctx.getSystemService(Context.NETWORK_STATS_SERVICE);

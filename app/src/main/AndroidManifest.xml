@@ -17,6 +17,8 @@
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <!-- build-6: add the yard Wi-Fi from the office (device owner); read telco texts on the SIM (load / expiry) -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <!-- KeepAlive: stay in the foreground class so Android never freezes the app or cuts its network -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

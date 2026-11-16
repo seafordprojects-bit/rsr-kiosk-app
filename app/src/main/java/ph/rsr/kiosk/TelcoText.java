@@ -9,13 +9,23 @@ package ph.rsr.kiosk;
 final class TelcoText {
     private TelcoText() { }
 
+    private static final java.util.regex.Pattern TELCO =
+            java.util.regex.Pattern.compile("(?i)(dito|gomo|globe|\\btm\\b|smart|\\btnt\\b|\\bsun\\b)");
+
+    /** Only the telco: its name (DITO, GOMO, Globe, TM, Smart, TNT, Sun) or a 3-5 digit short code. A person,
+     *  a bank / GCash code or any other sender is never sent (review 2026-11-16: names alone were too wide). */
     static boolean isTelcoSender(String sender) {
         if (sender == null) return false;
         String s = sender.trim();
         if (s.isEmpty()) return false;
-        for (int i = 0; i < s.length(); i++) if (Character.isLetter(s.charAt(i))) return true;   // a name = telco / service
-        String digits = s.replaceAll("[^0-9]", "");
-        return !digits.isEmpty() && digits.length() <= 6;   // short code; 7+ digits = a person's number
+        if (TELCO.matcher(s).find()) return true;
+        return s.matches("[0-9]{3,5}");
+    }
+
+    /** A person's number inside a telco text (missed call, pasaload) is masked before it leaves the tablet. */
+    static String maskNumbers(String body) {
+        if (body == null) return "";
+        return body.replaceAll("(\\+?63|0)?9[0-9]{2}[ -]?[0-9]{3}[ -]?[0-9]{4}", "09*********");
     }
 
     static String clip(String body) {

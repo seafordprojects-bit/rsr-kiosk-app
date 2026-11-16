@@ -768,12 +768,13 @@ public class KioskActivity extends Activity implements Core.Host {
      *  wake lock alone is ignored). Keyguard is off by policy; asked to dismiss anyway (harmless). */
     @Override
     public void turnScreenOnNow() {
+        if (Build.VERSION.SDK_INT < 27) return;   // Android 8.0: only the wake lock path
         try {
             setShowWhenLocked(true);
             setTurnScreenOn(true);
             android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
             if (km != null && km.isKeyguardLocked()) km.requestDismissKeyguard(this, null);
-        } catch (Exception e) {
+        } catch (Throwable e) {
             Log.w("RSRKiosk", "turn screen on", e);
         }
     }
