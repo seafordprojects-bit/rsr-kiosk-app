@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.UserManager;
 import android.util.Log;
 
@@ -63,6 +64,10 @@ final class Policy {
         // build-6: telco texts on the SIM (load / expiry). Android may refuse this restricted permission for an app
         // installed by the self-updater; the tablet then reports sms_ok=false and the office uses screenshots.
         // build-6 Set Wi-Fi: reading the saved networks (to switch back if a new Wi-Fi fails) needs location permission
+        // Samsung only lets an app turn the screen on (call wake, 06:45 schedule, office Screen on) when its
+        // notifications are allowed (found on Carmen 2026-11-16: "Screen__On : Cancel (notifications are disabled)")
+        if (Build.VERSION.SDK_INT >= 33) run("perm notif", () -> d.setPermissionGrantState(a, c.getPackageName(),
+                Manifest.permission.POST_NOTIFICATIONS, DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         run("perm phone", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.READ_PHONE_STATE,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED));
         run("perm loc", () -> d.setPermissionGrantState(a, c.getPackageName(), Manifest.permission.ACCESS_FINE_LOCATION,

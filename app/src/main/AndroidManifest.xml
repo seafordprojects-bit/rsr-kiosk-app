@@ -22,6 +22,9 @@
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <!-- build-6: a call to the SIM wakes the kiosk (only "ringing" is read; never the caller's number) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Carmen 2026-11-16 (logcat): Samsung refuses to turn the screen on for an app whose notifications are blocked
+         ("Screen on NOT allowed for notification blocked apps"). Android 13+ blocks them unless this is declared + granted. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- KeepAlive: stay in the foreground class so Android never freezes the app or cuts its network -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
