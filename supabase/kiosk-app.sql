@@ -238,6 +238,7 @@ create table if not exists public.kiosk_app_modem (
   read_fail_alerted  boolean not null default false,
   inbox_full_alerted boolean not null default false
 );
+alter table public.kiosk_app_modem add column if not exists month_clear date;   -- the modem's month counter start (cross-check)
 revoke all on public.kiosk_app_modem from public, anon, authenticated;
 alter table public.kiosk_app_modem enable row level security;   -- default closed (data exposure rule 2026-11-16)
 
@@ -1023,6 +1024,7 @@ declare
   v_at    timestamptz := public.kiosk_app_ts(m->>'at');
   v_delta bigint;
   v_rst   boolean := false;
+  v_mclr  date    := case when m->>'month_clear' ~ '^20[0-9]{2}-[0-9]{2}-[0-9]{2}$' then public.kiosk_app_text_date(m->>'month_clear') end;
   v_cum   bigint;
   x       public.kiosk_app_modem%rowtype;
   v_nm    text;
@@ -1035,18 +1037,26 @@ begin
   insert into public.kiosk_app_modem as y (device_id) values (p_device) on conflict (device_id) do nothing;
   select * into x from public.kiosk_app_modem y where y.device_id = p_device for update;
   if x.last_read_at is not null and v_at <= x.last_read_at then return; end if;   -- an old or repeated read
-  if x.last_total is null then
-    v_delta := 0;                          -- first read: only the starting point
-  elsif coalesce(v_host, x.host) is distinct from x.host or v_tot < x.last_total
-        or (v_secs is not null and x.last_secs is not null and v_secs < x.last_secs) then
+  if x.last_total is null or coalesce(v_host, x.host) is distinct from x.host then
+    v_delta := 0;                          -- first read, or another modem: only the starting point
+  elsif v_tot < x.last_total or (v_secs is not null and x.last_secs is not null and v_secs < x.last_secs) then
     v_delta := v_tot; v_rst := true;       -- the modem restarted (its counter began again at 0): all of it is new
   else
     v_delta := v_tot - x.last_total;
   end if;
+  -- cross-check with the modem's MONTH counter (it survives a restart): a restart not seen from the total (long gap
+  -- between reads) would otherwise lose what the modem had counted before it. Too low is the dangerous side.
+  if v_delta is not null and x.last_total is not null and v_mclr is not null and v_mclr = x.month_clear
+     and v_monb is not null and x.month_bytes is not null and v_monb >= x.month_bytes
+     and coalesce(v_host, x.host) is not distinct from x.host then
+    v_delta := greatest(v_delta, v_monb - x.month_bytes);
+  end if;
+  -- a jump over 30 GB between two reads is not real use (another modem behind the same address): new starting point
+  if v_delta > 30 * 1073741824::bigint then v_delta := 0; v_rst := false; end if;
   v_cum := x.cum_bytes + v_delta;
   update public.kiosk_app_modem y set
     host = coalesce(v_host, y.host), cum_bytes = v_cum, last_total = v_tot, last_secs = v_secs, last_read_at = v_at,
-    first_read_at = coalesce(y.first_read_at, v_at), day_bytes = v_dayb, month_bytes = v_monb,
+    first_read_at = coalesce(y.first_read_at, v_at), day_bytes = v_dayb, month_bytes = v_monb, month_clear = v_mclr,
     inbox = coalesce(v_inbox, y.inbox),
     restarts = y.restarts + case when v_rst and y.load_gb is not null then 1 else 0 end,
     read_fail_alerted = false,
@@ -1072,12 +1082,12 @@ begin
   if v_inbox is not null and x.inbox is not null and v_inbox > x.inbox then
     perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || ' - the yard WiFi modem received ' || (v_inbox - x.inbox)
             || ' new text' || case when v_inbox - x.inbox > 1 then 's' else '' end || ' (' || v_inbox
-            || ' in its inbox). To read: on the yard WiFi open https://192.168.1.1 > Tools > SMS.');
+            || ' in its inbox). To read: on the yard WiFi open http://192.168.1.1 > Tools > SMS.');
   end if;
   if v_inbox >= 450 and not x.inbox_full_alerted then
     update public.kiosk_app_modem y set inbox_full_alerted = true where y.device_id = p_device;
     perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || ' - the yard WiFi modem inbox is almost full (' || v_inbox
-            || ' of 500 texts). Delete old texts (https://192.168.1.1 > Tools > SMS), or new load texts cannot come in.');
+            || ' of 500 texts). Delete old texts (http://192.168.1.1 > Tools > SMS), or new load texts cannot come in.');
   end if;
 end $$;
 revoke all on function public.kiosk_app_modem_put(text, jsonb) from public, anon, authenticated;
@@ -1241,7 +1251,9 @@ begin
 
   if v_td is not null then
     if v_td = 0 then
-      update public.kiosk_app_modem y set test_until = null, test_summary = true where y.device_id = p_device;
+      -- test_from set too, so a later first load does not start the 14-day test after all
+      update public.kiosk_app_modem y set test_from = coalesce(y.test_from, v_today), test_until = null, test_summary = true
+       where y.device_id = p_device;
     else
       update public.kiosk_app_modem y set test_from = v_today, test_until = v_today + v_td - 1, test_last = null, test_summary = false
        where y.device_id = p_device;
@@ -1810,7 +1822,8 @@ begin
   -- BUILD-7 yard WiFi modem: reads stopped / TEST evening line / end-of-test summary / WEEKLY Monday line
   for mm in select x.*, coalesce(nullif(k.name, ''), x.device_id) as nm, k.last_seen as seen, k.modem_err as err
               from public.kiosk_app_modem x join public.kiosk_app_devices k on k.device_id = x.device_id loop
-    if mm.last_read_at < now() - interval '2 days' and mm.seen > now() - interval '30 minutes' and not mm.read_fail_alerted then
+   begin   -- one modem's problem never stops the rest of the tick
+    if coalesce(mm.last_read_at, mm.load_at) < now() - interval '2 days' and mm.seen > now() - interval '30 minutes' and not mm.read_fail_alerted then
       update public.kiosk_app_modem y set read_fail_alerted = true where y.device_id = mm.device_id;
       perform public.kiosk_alert_send('RSR Kiosk: ' || mm.nm || ' - the yard WiFi modem has not been read for 2 days ('
               || coalesce(mm.err, 'no reason given') || '). The load left is not being watched: check that the tablet is on the PLDT WiFi.');
@@ -1823,7 +1836,9 @@ begin
       perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'test'));
     end if;
     -- end of the test: summary once, then weekly
-    if mm.test_until is not null and v_today > mm.test_until and not mm.test_summary then
+    -- (after the last evening line, or the next morning - never at midnight)
+    if mm.test_until is not null and not mm.test_summary
+       and ((v_today = mm.test_until and v_min >= 19*60 + 20 and mm.test_last = v_today) or (v_today > mm.test_until and v_min >= 7*60)) then
       update public.kiosk_app_modem y set test_summary = true where y.device_id = mm.device_id;
       perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'summary'));
     end if;
@@ -1833,6 +1848,8 @@ begin
       update public.kiosk_app_modem y set weekly_last = v_today where y.device_id = mm.device_id;
       perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'weekly'));
     end if;
+   exception when others then null;
+   end;
   end loop;
 
   -- a Wi-Fi password never waits on the server longer than the command itself (30 min)

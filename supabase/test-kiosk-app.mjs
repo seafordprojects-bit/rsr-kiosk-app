@@ -774,7 +774,7 @@ ok(Math.round(PT.night/G*100)===10 && Math.round(PT.am/G*100)===80 && Math.round
 let MS=(await q(`select public.kiosk_app_modem_msg($1,'summary') m`,[B8]))[0].m;
 ok(MS.includes('TEST finished (2 days)') && MS.includes('average 0.6 GB a day') && MS.includes('highest 1.2 GB') && MS.includes('night (7:10 PM-10 AM) average 0.05 GB') && MS.includes('From now on: one report every Monday'),'test summary: day before the first read counts 0 ('+MS+')');
 await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
-ok(await sentN('Test Modem - Yard WiFi TEST finished')===1,'tick sends the summary once after the test ends');
+ok(await sentN('Test Modem - Yard WiFi TEST finished')===((await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h>=7?1:0),'tick sends the summary once after the test ends (never before 7 AM)');
 MS=(await q(`select public.kiosk_app_modem_msg($1,'test') m`,[B7]))[0].m;
 ok(MS.includes('Carmen Kiosk - Yard WiFi TEST day 1 of 7') && MS.includes('GB left') && !MS.includes('?'),'evening TEST line, no unknown parts ('+MS+')');
 MS=(await q(`select public.kiosk_app_modem_msg($1,'weekly') m`,[B7]))[0].m;
@@ -787,7 +787,29 @@ await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(
 ok(await sentN('Carmen Kiosk - the yard WiFi modem has not been read for 2 days (no modem found)')===1,'modem not read for 2 days: alert once');
 await mread({total_bytes:13.74*G,total_secs:3200});
 ok((await M()).read_fail_alerted===false,'read again: alert can come again later');
-await q(`delete from kiosk_app_devices where device_id=$1`,[B8]); await q(`delete from kiosk_app_modem where device_id=$1`,[B8]);
+// review 2026-11-17: another modem / a huge jump / a restart the total did not show / never read / test 0
+let c0=Number((await M()).cum_bytes);
+await mread({host:'192.168.8.1',total_bytes:3*G,total_secs:50});
+ok(Number((await M()).cum_bytes)===c0 && (await M()).host==='192.168.8.1','another modem (address changed): new starting point, nothing added');
+await mread({host:'192.168.8.1',total_bytes:40*G,total_secs:60});
+ok(Number((await M()).cum_bytes)===c0,'a jump over 30 GB in one read: new starting point, not counted');
+await mread({host:'192.168.8.1',total_bytes:40*G+0.1*G,total_secs:100,month_bytes:Math.round(1*G),month_clear:'2026-11-01'});
+c0=Number((await M()).cum_bytes);
+// modem restarted between reads but its connect time is already higher again: total says +0.2, month counter says +1.2
+await mread({host:'192.168.8.1',total_bytes:40*G+0.3*G,total_secs:5000,month_bytes:Math.round(2.2*G),month_clear:'2026-11-01'});
+ok(Math.round((Number((await M()).cum_bytes)-c0)/G*100)===120,'restart hidden from the total: month counter adds the real 1.20 GB');
+c0=Number((await M()).cum_bytes);
+await mread({host:'192.168.8.1',total_bytes:40*G+0.5*G,total_secs:5100,month_bytes:Math.round(0.1*G),month_clear:'2026-12-01'});
+ok(Math.round((Number((await M()).cum_bytes)-c0)/G*100)===20,'new month (counter cleared): the total is used (+0.20)');
+const B9='app-b9tab';
+await q(`insert into kiosk_app_devices(device_id,name,token,last_seen) values ($1,'Never Read','t',now())`,[B9]);
+ok((await q(`select public.kiosk_app_modem_set('123456',$1,'{"test_days":"0"}') r`,[B9]))[0].r.ok===true,'test 0 before any load');
+ok((await q(`select public.kiosk_app_modem_set('123456',$1,'{"add_gb":"16"}') r`,[B9]))[0].r.ok===true,'load recorded, modem never read');
+ok((await q(`select test_until from kiosk_app_modem where device_id=$1`,[B9]))[0].test_until===null,'test 0 kept: the first load does not start the test');
+await q(`update kiosk_app_modem set load_at=now()-interval '3 days' where device_id=$1`,[B9]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(await sentN('Never Read - the yard WiFi modem has not been read for 2 days')===1,'load recorded but the modem never read for 2 days: alert');
+await q(`delete from kiosk_app_devices where device_id in ($1,$2)`,[B8,B9]); await q(`delete from kiosk_app_modem where device_id in ($1,$2)`,[B8,B9]);
 await q(`delete from sent`);
 }
 

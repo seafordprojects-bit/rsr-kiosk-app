@@ -380,7 +380,7 @@ function modemHtml(t) {
     <div class="mute">Last modem read ${m.last_read_at ? esc(hhmm(m.last_read_at)) + ' (' + esc(ago(m.last_read_at)) + ')' : '-'}
       ${m.restarts ? ' - modem restarted ' + esc(m.restarts) + 'x since the load (figure may be a bit low)' : ''}
       ${m.inbox != null ? ' - ' + esc(m.inbox) + ' texts in the modem' : ''}</div>
-    ${m.inbox >= 450 ? '<div class="warnbox">Modem inbox almost full: delete old texts at https://192.168.1.1 &gt; Tools &gt; SMS (on the yard WiFi).</div>' : ''}
+    ${m.inbox >= 450 ? '<div class="warnbox">Modem inbox almost full: delete old texts at http://192.168.1.1 &gt; Tools &gt; SMS (on the yard WiFi).</div>' : ''}
     ${err}${btns}</div>`;
 }
 function modemSet(device, body, okText) {

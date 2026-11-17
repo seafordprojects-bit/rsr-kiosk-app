@@ -44,6 +44,7 @@ final class ModemRead {
     static void request(Context ctx, boolean force, BooleanSupplier quiet) {
         synchronized (LOCK) {
             if (running || !ModemXml.due(System.currentTimeMillis(), lastAt, force)) return;
+            if (!force && !quiet.getAsBoolean()) return;   // not now: the 1-minute loop asks again (no thread started)
             running = true;
         }
         final Context app = ctx.getApplicationContext();
@@ -51,7 +52,10 @@ final class ModemRead {
             try {
                 long end = System.currentTimeMillis() + (force ? 180_000L : 0);
                 while (!quiet.getAsBoolean()) {
-                    if (System.currentTimeMillis() >= end) return;   // not now; the next chance comes by itself
+                    if (System.currentTimeMillis() >= end) {   // not now; the next chance comes by itself
+                        if (force) setError("skipped: kiosk busy or punch rush - try again later");
+                        return;
+                    }
                     Thread.sleep(10_000);
                 }
                 readNow(app);

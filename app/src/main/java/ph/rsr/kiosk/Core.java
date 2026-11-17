@@ -464,7 +464,6 @@ final class Core {
                 throw e;
             }
             net.beatOk();
-            if (modem != null) ModemRead.sent(modem);
             if (ev != null && ev.equals(pendingEvent)) pendingEvent = null;
             if (TextQueue.list(ctx).length() > 0) bg.post(this::sendTexts);   // texts that waited for the network
 
@@ -473,6 +472,7 @@ final class Core {
                 prefs.setLastBeatStatus("REJECTED by server - press Forget tablet on the Tablets page");
                 return;
             }
+            if (modem != null) ModemRead.sent(modem);   // only once the server accepted this tablet's report
             prefs.setLastBeatStatus("ok " + android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis()));
             String tok = r.optString("token", "");
             if (tok.matches("[0-9a-f-]{36}") && !tok.equals(prefs.token())) prefs.setToken(tok);
@@ -606,6 +606,7 @@ final class Core {
             }
             case "read_modem":
                 // office button: read the yard modem at the next quiet moment (never in a rush / under a worker's hands)
+                if (inRush()) { ack(id, "refused: punch rush time - send again later"); break; }
                 modemRead(true);
                 ack(id, "reading the modem - result in about 1 minute");
                 bg.postDelayed(this::beat, 20_000);
