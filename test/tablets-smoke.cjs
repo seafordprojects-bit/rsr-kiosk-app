@@ -12,7 +12,8 @@ const { chromium } = require('playwright');
     sim: { provider: 'GOMO', close_days: 365, operator: 'GOMO', state: 'ready', sms_ok: false, data_today_mb: 120,
       load: { id: 4, provider: 'GOMO', promo: 'GO+99', gb: 25, load_date: '2026-11-01', expires_on: '2026-12-01', source: 'screenshot', days_left: 15, used_mb: 6200, has_shot: true },
       closes_on: '2027-11-01', texts: [{ from: 'GOMO', body: 'Your data is running low <script>x</script>', at: iso(36e5), kind: 'low' }] } };
-  const phone = { device_id: 'app-2', name: 'Carmen roll-call phone', phone: true, page_url: 'https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html', online: false, last_seen: iso(36e5), battery: 60, charging: false, events: [] };
+  const phone = { device_id: 'app-2', name: 'Carmen roll-call phone', phone: true, page_url: 'https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html', online: false, last_seen: iso(36e5), battery: 60, charging: false, events: [],
+    device_owner: false, battery_unrestricted: false, net: { type: 'mobile', mobile_ok: false }, sim: { provider: 'SMART', load: { expires_on: '2026-11-01', days_left: -1 } }, modem: { load_gb: 16, left_gb: 2 } };
   const carmen = { device_id: 'app-3', name: 'Carmen Kiosk', online: true, last_seen: iso(1e4), battery: 70, charging: true, events: [], net: { type: 'wifi', down_today_min: 0, down_7d_min: 0, periods: [] }, punches: null, sim: { provider: 'DITO', state: 'ready', sms_ok: true, texts: [], load: null },
     modem: { host: '192.168.1.1', last_read_at: iso(5 * 6e4), inbox: 13, restarts: 1, used_today_gb: 0.35, used_7d_gb: 1.2, load_gb: 16, load_date: '2026-11-17',
       used_since_load_gb: 6.01, left_gb: 9.99, gb_per_day: 0.8, days_to_empty: 12, alerted_gb: 10, mode: 'test', test_day: 3, test_days: 14 } };
@@ -48,7 +49,7 @@ const { chromium } = require('playwright');
     battery: txt.includes('not "Unrestricted"'), sim: txt.includes('SIM - GOMO') && txt.includes('6.1 GB of 25 GB (24%)') && txt.includes('15 days left'),
     closes: txt.includes('Number closes if no load by'), smsNo: txt.includes('NOT allowed on this tablet'),
     noScriptInjected: (await p.$$('#list script')).length === 0 && !(await p.innerHTML('#list')).includes('<b>Dela'),
-    phoneNoSim: !(await p.innerHTML('#list')).match(/Carmen roll-call phone[\s\S]*?SIM - /) || true,
+    phoneNoSim: !(await p.innerHTML('#list > :nth-child(2 of .card)')).includes('SIM - ') && !(await p.innerHTML('#list > :nth-child(2 of .card)')).includes('Yard WiFi load'),
     carmenNoLoad: txt.includes('No load recorded yet'),
     modem: txt.includes('Yard WiFi load') && txt.includes('about 9.99 GB of 16 GB') && txt.includes('12 days') && txt.includes('TEST day 3 of 14')
       && txt.includes('13 texts in the modem') && txt.includes('restarted 1x'),

@@ -23,7 +23,7 @@
   .chead{display:flex;align-items:center;gap:10px}
   .chead .dot{flex:none;width:14px;height:14px;box-shadow:0 0 0 4px color-mix(in srgb,currentColor 0%,transparent)}
   .chead .nm{flex:1;min-width:0}
-  .chead .nm .name{display:block;font-size:19px;line-height:1.2}
+  .chead .nm .name{display:block;font-size:19px;line-height:1.2;overflow-wrap:anywhere}
   .chead .nm .mute{font-size:13px}
   .pill{display:inline-block;font-size:12px;font-weight:700;border-radius:999px;padding:3px 9px;white-space:nowrap}
   .pill.ok{background:#e7f6ef;color:var(--ok)} .pill.bad{background:#fdecea;color:var(--bad)} .pill.warn{background:#fff4d6;color:#8a5200} .pill.mute{background:var(--btn);color:var(--mute)}
@@ -33,9 +33,9 @@
   .attn.bad{background:#fdecea;color:var(--bad)} .attn.warn{background:#fff4d6;color:#6b4300}
   .attn li.w{color:#8a5200} .attn.bad li.w{color:#8a5200}
   @media (prefers-color-scheme:dark){.attn.bad{background:#3a1717;color:#ff8a80}.attn.warn{background:#3a2f12;color:#ffc04d}.attn li.w,.attn.bad li.w{color:#ffc04d}}
-  .tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:10px 0}
+  .tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:10px 0}
   .tile{background:var(--bg);border-radius:12px;padding:8px 9px;min-height:58px;border:1px solid transparent;text-align:left;font-size:15px;line-height:1.25;
-        display:block;width:100%;color:var(--ink)}
+        display:block;width:100%;color:var(--ink);overflow-wrap:anywhere}
   .tile small{display:block;font-size:11px;font-weight:600;color:var(--mute);text-transform:uppercase;letter-spacing:.03em;margin-bottom:2px}
   .tile.bad{border-color:var(--bad)} .tile.bad span{color:var(--bad)} .tile.warn{border-color:var(--warn)} .tile.warn span{color:var(--warn)}
   button.tile{min-height:58px}
@@ -43,7 +43,7 @@
   .quick button{font-weight:600}
   .lastcmd{font-size:13px;margin:8px 0 2px}
   .acc{border-top:1px solid var(--line);margin:10px -14px 0;padding:0 14px}
-  .acc details{border-bottom:1px solid var(--line);margin:0}
+  .acc details{border-bottom:1px solid var(--line);margin:0;scroll-margin-top:64px}
   .acc details:last-child{border-bottom:0}
   .acc summary{list-style:none;display:flex;align-items:center;gap:8px;min-height:50px;padding:6px 0;color:var(--ink);font-size:16px}
   .acc summary::-webkit-details-marker{display:none}
@@ -61,7 +61,7 @@
   .kv dt{color:var(--mute)} .kv dd{margin:0;text-align:right;word-break:break-word}
   .skel{height:150px;border-radius:16px;margin-bottom:14px;background:linear-gradient(90deg,var(--card) 25%,var(--btn) 50%,var(--card) 75%);background-size:200% 100%;animation:sk 1.2s infinite linear;border:1px solid var(--line)}
   @keyframes sk{to{background-position:-200% 0}}
-  @media (min-width:640px){.tiles{grid-template-columns:repeat(6,1fr)}.quick{grid-template-columns:repeat(4,1fr)}}
+  @media (min-width:640px){.tiles{grid-template-columns:repeat(6,minmax(0,1fr))}.quick{grid-template-columns:repeat(4,1fr)}}
   .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .name{font-size:19px;font-weight:700;flex:1}
   .dot{width:12px;height:12px;border-radius:50%;display:inline-block}
@@ -291,24 +291,24 @@ function issues(t) {
   const p = t.punches;
   if (p && +p.stuck) add('bad', p.stuck + ' stuck punch' + (+p.stuck > 1 ? 'es' : '') + ' (will not sync by themselves)', 'punches');
   else if (p && (+p.queue || 0) + (+p.offline_queue || 0)) add('warn', ((+p.queue || 0) + (+p.offline_queue || 0)) + ' punches waiting to sync', 'punches');
+  if (t.maintenance) add('warn', 'In maintenance (unlocked)', 'details');
+  if (t.page_error && t.page_error_at && Date.now() - new Date(t.page_error_at) < 3600e3) add('warn', 'Page error in the last hour', 'details');
+  if (phone) return out;   // the roll-call phone has no punches / connection / SIM / yard parts to fix here
   const n = t.net || {};
-  if (!phone && n.type === 'mobile') add('warn', 'On MOBILE DATA (Wi-Fi down)', 'net');
-  if (!phone && n.type === 'none') add('bad', 'No connection', 'net');
+  if (n.type === 'mobile') add('warn', 'On MOBILE DATA (Wi-Fi down)', 'net');
+  if (n.type === 'none') add('bad', 'No connection', 'net');
   if (n.mobile_ok === false) add('warn', 'Mobile data not working on the SIM', 'net');
   if (t.battery_unrestricted === false) add('warn', 'Battery setting not "Unrestricted"', 'net');
   const s = t.sim || {}, l = s.load;
   if (l && l.expires_on && l.days_left <= 0) add('bad', 'SIM load EXPIRED', 'sim');
   else if (l && l.expires_on && l.days_left <= 7) add('warn', 'SIM load expires in ' + l.days_left + ' days', 'sim');
   if (s.otp) add('warn', 'Sign-in code from ' + s.otp.from + ' waiting', 'sim');
-  if (!phone && s.provider && !l) add('warn', 'SIM load not recorded yet', 'sim');
+  if (s.provider && !l) add('warn', 'SIM load not recorded yet', 'sim');
   const m = t.modem;
   if (m && m.load_gb != null && +m.left_gb < 5) add('bad', 'Yard WiFi load almost empty (' + gb(Math.max(+m.left_gb, 0)) + ')', 'modem');
   else if (m && m.load_gb != null && +m.left_gb < 10) add('warn', 'Yard WiFi load under 10 GB', 'modem');
   if (t.modem_err && m && m.load_gb != null) add('warn', 'Modem read problem: ' + t.modem_err, 'modem');
   if (m && m.load_gb == null) add('warn', 'Yard WiFi load not recorded yet', 'modem');
-  if (t.device_owner === false) add('warn', 'Pinning only (not fully locked)', 'details');
-  if (t.maintenance) add('warn', 'In maintenance (unlocked)', 'details');
-  if (t.page_error && t.page_error_at && Date.now() - new Date(t.page_error_at) < 3600e3) add('warn', 'Page error in the last hour', 'details');
   return out;
 }
 const lvlOf = (iss, sec) => iss.some(x => x.sec === sec && x.lvl === 'bad') ? 'bad' : iss.some(x => x.sec === sec) ? 'warn' : '';
@@ -388,8 +388,8 @@ function cardHtml(t, iss) {
   parts.push(part(t, 'details', 'Tablet details', D.sum, lvlOf(iss, 'details'), D.body));
   const sched = t.sched_on ? esc(t.sched_on) + '-' + esc(t.sched_off) : 'always on';
   parts.push(part(t, 'settings', 'Settings', 'Screen ' + sched + (t.power_windows ? ' - generator' : ''), '', `
-      <div class="kv"><dt>Screen schedule</dt><dd>${t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on'}</dd>
-        <dt>Power</dt><dd>${t.power_windows ? 'Generator ' + esc(t.power_windows).replace(/,/g, ', ') : 'Grid (always on)'}</dd></div>
+      <dl class="kv"><dt>Screen schedule</dt><dd>${t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on'}</dd>
+        <dt>Power</dt><dd>${t.power_windows ? 'Generator ' + esc(t.power_windows).replace(/,/g, ', ') : 'Grid (always on)'}</dd></dl>
       <div class="btns">
         ${cmdBtn(t, 'schedule', 'Screen schedule', '', '', 'data-on="' + esc(t.sched_on || '05:30') + '" data-off="' + esc(t.sched_off || '22:30') + '"')}
         <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
@@ -408,7 +408,7 @@ function cardHtml(t, iss) {
           <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
         </div></div>`));
   const ev = (t.events || []);
-  if (ev.length) parts.push(part(t, 'events', 'Recent activity', esc(ev[0].event).slice(0, 40), '',
+  if (ev.length) parts.push(part(t, 'events', 'Recent activity', esc(String(ev[0].event).slice(0, 40)), '',
       '<ul class="ev">' + ev.map(e => '<li>' + esc(e.event) + ' - ' + hhmm(e.at) + '</li>').join('') + '</ul>'));
 
   return `<div class="card">
@@ -488,7 +488,7 @@ function simPart(t) {
     return { sum: s.state === 'absent' ? 'no SIM' : 'no info yet', body: `<div class="mute">${s.state === 'absent' ? 'No SIM in this tablet.' : 'No SIM info yet (needs app build with SIM reporting).'}</div>
       <div class="btns"><button onclick="askSim('${id}','','')">SIM settings</button></div>` };
   }
-  let load = '<div class="warnbox">No load recorded yet - expiry and closing dates cannot be watched. Tap Record load.</div>', sum = 'no load recorded', cls = 'warn';
+  let load = '<div class="warnbox">No load recorded yet - expiry and closing dates cannot be watched. Tap Record load.</div>', sum = 'no load recorded', cls = s.provider ? 'warn' : '';
   if (l) {
     const left = l.days_left, pct = l.gb ? Math.round((l.used_mb || 0) / (l.gb * 1024) * 100) : null;
     sum = l.expires_on ? (left <= 0 ? 'EXPIRED' : left + ' days left') : 'no expiry'; cls = '';
