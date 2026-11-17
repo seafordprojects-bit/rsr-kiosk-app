@@ -21,6 +21,16 @@ drop function if exists public.kiosk_app_beat(jsonb);
 drop function if exists public.kiosk_app_shot_put(text, text, text);
 drop function if exists public.kiosk_app_shot_get(text, text);
 drop table if exists public.kiosk_app_shots;
+-- build-7
+drop function if exists public.kiosk_app_modem_set(text, text, jsonb);
+drop function if exists public.kiosk_app_modem_info(text);
+drop function if exists public.kiosk_app_modem_msg(text, text);
+drop function if exists public.kiosk_app_modem_put(text, jsonb);
+drop function if exists public.kiosk_app_modem_parts(text, date);
+drop function if exists public.kiosk_app_modem_cum_at(text, timestamptz);
+drop function if exists public.kiosk_app_gb(bigint);
+drop table if exists public.kiosk_app_modem_reads;
+drop table if exists public.kiosk_app_modem;
 -- build-6
 drop function if exists public.kiosk_app_sms_put(text, text, text, text, text);
 drop function if exists public.kiosk_app_sms_alert(bigint);

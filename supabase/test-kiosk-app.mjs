@@ -1,4 +1,4 @@
-const PUBLIC_CHECK = "select t as table_name,\n       has_table_privilege('anon', 'public.' || t, 'select') as public_can_read,\n       has_table_privilege('authenticated', 'public.' || t, 'select') as signed_in_can_read\n  from unnest(array['kiosk_app_devices','kiosk_app_events','kiosk_app_shots','kiosk_app_conn','kiosk_app_data_days',\n                    'kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots']) t;\n";
+const PUBLIC_CHECK = "select t as table_name,\n       has_table_privilege('anon', 'public.' || t, 'select') as public_can_read,\n       has_table_privilege('authenticated', 'public.' || t, 'select') as signed_in_can_read\n  from unnest(array['kiosk_app_devices','kiosk_app_events','kiosk_app_shots','kiosk_app_conn','kiosk_app_data_days',\n                    'kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots','kiosk_app_modem','kiosk_app_modem_reads']) t;\n";
 // SQL test for kiosk-app.sql on a throwaway local Postgres (npm i embedded-postgres pg; run as a non-root user from this folder).
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
@@ -670,9 +670,130 @@ await q(`update kiosk_app_devices set token_confirmed=true, cmd=null, cmd_arg=nu
 await q(`delete from sent`);
 }
 
+// ---- BUILD-7 yard WiFi modem (owner 2026-11-17). Worked example Raffy can check by hand (1 GB = 1,073,741,824 bytes):
+//  read 1: modem total 47,319,271 bytes (real 2026-11-17 figure)      -> starting point, used 0
+//  owner records a 16 GB load                                           -> left 16.00 GB
+//  read 2: total 47,319,271 + 1 GB                                      -> used 1.00 GB, left 15.00 -> "below 20 GB" at once
+//  read 3: MODEM RESTARTED, total 0.5 GB (connect time went down)       -> +0.50 (all of it is new): used 1.50, left 14.50
+//  read 4: total 0.5 GB + 4.5 GB = 5.0 GB                               -> +4.50: used 6.00, left 10.00 (not below 10: no alert)
+//  read 5: total 5.0 GB + 0.01 GB                                       -> used 6.01, left 9.99 -> "below 10 GB"
+//  read 6: total 5.01 GB + 5.2 GB                                       -> used 11.21, left 4.79 -> "below 5 GB, LOAD NOW" (one alert, not two)
+//  owner loads 16 GB more (no-expiry data adds up)                      -> left 4.79 + 16 = 20.79, alerts start again
+{
+const G=1073741824, B7='app-b7tab', MAN='https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen';
+await beat({device_id:B7,name:'Carmen Kiosk',battery:90,charging:true,page_url:MAN,net_type:'wifi'});
+await beat({device_id:B7,battery:90,charging:true,page_url:MAN,net_type:'wifi'});   // secret confirmed
+const t0=Date.now()-50*60000; let n=0;
+const at=()=>new Date(t0+(n++)*60000).toISOString().replace(/\.\d+Z$/,'Z');
+const mread=async (m, extra) => { if (typeof m.total_bytes==='number') m.total_bytes=Math.round(m.total_bytes); return beat(Object.assign({device_id:B7,battery:90,charging:true,page_url:MAN,net_type:'wifi',modem:Object.assign({at:at(),host:'192.168.1.1'},m)}, extra||{})); };
+const M=async()=>(await q(`select * from kiosk_app_modem where device_id=$1`,[B7]))[0];
+const left=async()=>{ const m=await M(); return Math.round((Number(m.load_gb) - (Number(m.cum_bytes)-Number(m.load_cum))/G)*100)/100; };
+const sentN=async(s)=>(await q(`select msg from sent where msg like $1`,['%'+s+'%'])).length;
+const set=async(p,pc)=>(await q(`select public.kiosk_app_modem_set($1,$2,$3::jsonb) r`,[pc||'123456',B7,JSON.stringify(p)]))[0].r;
+await q(`delete from sent`);
+await mread({total_bytes:47319271,total_secs:21580,day_bytes:49282023,month_bytes:49282023,month_clear:'2026-11-17',inbox:12});
+let m=await M();
+ok(m && Number(m.cum_bytes)===0 && Number(m.last_total)===47319271 && m.inbox===12,'modem read 1: starting point only (used 0), inbox 12');
+ok((await q(`select count(*)::int n from kiosk_app_modem_reads where device_id=$1`,[B7]))[0].n===1,'read saved');
+ok((await set({add_gb:'16'},'000000')).error==='wrong passcode','record yard load: wrong passcode refused');
+ok((await set({add_gb:'abc'})).error && (await set({add_gb:'0'})).error && (await set({add_gb:'16',load_date:'2099-01-01'})).error,'record yard load: bad GB / future date refused');
+ok((await set({left_gb:'5'})).error==='record a load first','correct GB left needs a load first');
+ok((await set({add_gb:'16'})).ok===true && await left()===16,'16 GB load recorded: left 16.00');
+m=await M(); ok(m.test_until && Math.round((new Date(m.test_until)-new Date(m.test_from))/864e5)===13,'first load starts the 14-day TEST');
+await mread({total_bytes:47319271+G,total_secs:22000,inbox:12});
+ok(await left()===15,'read 2: used 1.00 GB, left 15.00');
+ok(await sentN('below 20 GB')===1 && await sentN('about 15 GB left of 16 GB')===1,'below 20 GB: Telegram AT ONCE (owner: let it fire)');
+await mread({total_bytes:0.5*G,total_secs:300,inbox:12});
+m=await M(); ok(await left()===14.5 && m.restarts===1,'read 3: modem restarted -> +0.50 counted, left 14.50, restart counted');
+await mread({total_bytes:5*G,total_secs:900,inbox:12});
+ok(await left()===10 && await sentN('below 10 GB')===0,'read 4: left exactly 10.00: no "below 10" yet');
+await mread({total_bytes:5.01*G,total_secs:960,inbox:12});
+ok(await left()===9.99 && await sentN('below 10 GB')===1,'read 5: left 9.99 -> "below 10 GB" once');
+await mread({total_bytes:5.01*G,total_secs:970,inbox:12});
+ok(await sentN('below 10 GB')===1 && await sentN('below 20 GB')===1,'same level again: no repeat');
+await mread({total_bytes:10.21*G,total_secs:2000,inbox:12});
+ok(await left()===4.79 && await sentN('below 5 GB')===1 && await sentN('LOAD NOW')===1,'read 6: left 4.79 -> "below 5 GB, LOAD NOW" (one message)');
+// old / repeated / bad readings
+const before=Number((await M()).cum_bytes);
+await beat({device_id:B7,battery:90,charging:true,page_url:MAN,modem:{at:new Date(t0).toISOString().replace(/\.\d+Z$/,'Z'),host:'192.168.1.1',total_bytes:99*G}});
+ok(Number((await M()).cum_bytes)===before,'an older read is ignored');
+await beat({device_id:B7,battery:90,charging:true,page_url:MAN,modem:{at:at(),total_bytes:'abc'}});
+await beat({device_id:B7,battery:90,charging:true,page_url:MAN,modem:{at:at(),total_bytes:-5}});
+ok(Number((await M()).cum_bytes)===before,'bad totals ignored');
+await beat({device_id:B7,token:'wrong',battery:90,charging:true,page_url:MAN,modem:{at:at(),total_bytes:50*G}});
+ok(Number((await M()).cum_bytes)===before,'reading with a wrong secret ignored');
+await mread({total_bytes:10.21*G,total_secs:2100,inbox:12},{modem_err:'no modem found<script>'});
+ok((await q(`select modem_err from kiosk_app_devices where device_id=$1`,[B7]))[0].modem_err==='no modem foundscript','modem error kept, cleaned');
+await mread({total_bytes:10.21*G,total_secs:2200,inbox:12});
+ok((await q(`select modem_err from kiosk_app_devices where device_id=$1`,[B7]))[0].modem_err===null,'good read clears the error');
+ok((await q(`select host from kiosk_app_modem where device_id=$1`,[B7]))[0].host==='192.168.1.1','host stays the modem address');
+// second load adds to what is left (Magic Data has no expiry)
+ok((await set({add_gb:'16'})).ok && await left()===20.79,'second 16 GB load: 4.79 + 16 = 20.79 left');
+m=await M(); ok(m.alerted_gb===null && m.restarts===0,'new load: alerts and restart count start again');
+ok(Math.round((new Date(m.test_until)-new Date(m.test_from))/864e5)===13,'second load does not restart the test');
+await mread({total_bytes:10.22*G,total_secs:2300,inbox:12});
+ok(await sentN('of 20.79 GB')===0,'20.78 left: no alert');
+await mread({total_bytes:11.22*G,total_secs:2400,inbox:12});
+ok(await sentN('of 20.79 GB (below 20 GB)')===1,'below 20 again after the new load');
+// correct GB left (seen in the Smart app)
+ok((await set({left_gb:'12.5'})).ok && await left()===12.5,'owner corrects GB left to 12.50');
+await mread({total_bytes:11.23*G,total_secs:2500,inbox:12});
+ok(await sentN('about 12.5 GB left')===0,'corrected figure under 20: not alerted again');
+await mread({total_bytes:13.73*G,total_secs:2600,inbox:12});
+ok(await left()===9.99 && await sentN('(below 10 GB)')===2,'then below 10 alerts as usual');
+// texts in the modem: only the count
+await q(`delete from sent`);
+await mread({total_bytes:13.73*G,total_secs:2700,inbox:13});
+ok(await sentN('received 1 new text (13 in its inbox)')===1,'new text in the modem: Telegram (count only)');
+await mread({total_bytes:13.73*G,total_secs:2800,inbox:13});
+ok(await sentN('new text')===1,'same count: no repeat');
+await mread({total_bytes:13.73*G,total_secs:2900,inbox:455});
+await mread({total_bytes:13.73*G,total_secs:3000,inbox:456});
+ok(await sentN('inbox is almost full')===1,'inbox almost full: once');
+await mread({total_bytes:13.73*G,total_secs:3100});
+ok((await M()).inbox===456,'inbox not answered (locked): last count kept, no alert');
+// Tablets page
+let LM=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===B7);
+ok(LM.modem && Number(LM.modem.left_gb)===9.99 && LM.modem.mode==='test' && LM.modem.test_day===1 && LM.modem.test_days===14 && LM.modem.inbox===456,'Tablets page: GB left, TEST day 1 of 14, inbox');
+ok((await q(`select public.kiosk_app_command('123456',$1,'read_modem','') r`,[B7]))[0].r.ok===true,'office button "Read modem" accepted');
+// test length
+ok((await set({test_days:'99'})).error && (await set({test_days:'x'})).error,'test days 0-60 only');
+ok((await set({test_days:'7'})).ok,'test restarted for 7 days');
+m=await M(); ok(Math.round((new Date(m.test_until)-new Date(m.test_from))/864e5)===6 && m.test_summary===false,'7-day test set');
+// day parts at the report times (rows placed on a past day so the clock does not matter): night 0.10, 10-3 0.80, 3-7:10 0.30
+const D=(await q(`select (now() at time zone 'Asia/Manila')::date - 3 as d`))[0].d;
+const ds=(await q(`select to_char($1::date,'YYYY-MM-DD') s`,[D]))[0].s;
+const B8='app-b8tab';
+await q(`insert into kiosk_app_devices(device_id,name,token) values ($1,'Test Modem','t')`,[B8]);
+await q(`insert into kiosk_app_modem(device_id,cum_bytes,load_gb,load_cum,load_date,load_at,test_from,test_until,test_summary)
+         values ($1,${Math.round(1.2*G)},16,0,$2::date-1,now()-interval '4 days',$2::date-1,$2::date,false)`,[B8,D]);
+for (const [d,tm,cum] of [[-1,'19:05',0],[0,'09:59',0.1],[0,'14:58',0.9],[0,'19:08',1.2]])
+  await q(`insert into kiosk_app_modem_reads(device_id,at,total_bytes,cum_bytes) values ($1, (($2::date + $3::int) + $4::time) at time zone 'Asia/Manila', 0, $5)`,[B8,D,d,tm,Math.round(cum*G)]);
+const PT=(await q(`select public.kiosk_app_modem_parts($1,$2::date) j`,[B8,D]))[0].j;
+ok(Math.round(PT.night/G*100)===10 && Math.round(PT.am/G*100)===80 && Math.round(PT.pm/G*100)===30 && Math.round(PT.day/G*100)===120,'day parts: night 0.10, 10 AM-3 PM 0.80, 3-7:10 PM 0.30, day 1.20 GB');
+let MS=(await q(`select public.kiosk_app_modem_msg($1,'summary') m`,[B8]))[0].m;
+ok(MS.includes('TEST finished (2 days)') && MS.includes('average 0.6 GB a day') && MS.includes('highest 1.2 GB') && MS.includes('night (7:10 PM-10 AM) average 0.05 GB') && MS.includes('From now on: one report every Monday'),'test summary: day before the first read counts 0 ('+MS+')');
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok(await sentN('Test Modem - Yard WiFi TEST finished')===1,'tick sends the summary once after the test ends');
+MS=(await q(`select public.kiosk_app_modem_msg($1,'test') m`,[B7]))[0].m;
+ok(MS.includes('Carmen Kiosk - Yard WiFi TEST day 1 of 7') && MS.includes('GB left') && !MS.includes('?'),'evening TEST line, no unknown parts ('+MS+')');
+MS=(await q(`select public.kiosk_app_modem_msg($1,'weekly') m`,[B7]))[0].m;
+ok(MS.includes('Yard WiFi weekly: used') && MS.includes('GB left'),'weekly line ('+MS+')');
+ok((await q(`select public.kiosk_app_modem_msg($1,'weekly') m`,['app-none']))[0].m===null,'no modem: no message');
+// reads stopped for 2 days while the tablet still reports
+await q(`update kiosk_app_modem set last_read_at=now()-interval '3 days' where device_id=$1`,[B7]);
+await q(`update kiosk_app_devices set last_seen=now(), modem_err='no modem found' where device_id=$1`,[B7]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok(await sentN('Carmen Kiosk - the yard WiFi modem has not been read for 2 days (no modem found)')===1,'modem not read for 2 days: alert once');
+await mread({total_bytes:13.74*G,total_secs:3200});
+ok((await M()).read_fail_alerted===false,'read again: alert can come again later');
+await q(`delete from kiosk_app_devices where device_id=$1`,[B8]); await q(`delete from kiosk_app_modem where device_id=$1`,[B8]);
+await q(`delete from sent`);
+}
+
 // anon cannot read tables
-// the owner's go-live check (supabase/paste/build6-3-public-check.sql): every table "public can read = false"
-{ const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===8 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 8 tables'); }
+// the owner's go-live check (supabase/paste/build7-public-check.sql): every table "public can read = false"
+{ const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===10 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 10 tables'); }
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
 ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c.query(`select public.kiosk_app_tick()`);}catch(e){tickDenied=true;} ok(tickDenied,'anon cannot run tick');
@@ -687,6 +808,12 @@ for (const f of [`kiosk_app_sim_info('x')`,`kiosk_app_down_min('x', now())`,`kio
   let d=false; try{ await c.query(`select public.${f}`);}catch(e){d=true;} ok(d,'public key cannot run '+f.split('(')[0]);
 }
 { const r=(await c.query(`select public.kiosk_app_load_shot_get('000000','x') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no load screenshot'); }
+// build-7 data exposure: the public key reads no modem table or helper; the office RPC needs the passcode
+for (const t of ['kiosk_app_modem','kiosk_app_modem_reads']) { let d=false; try{ await c.query(`select * from ${t}`);}catch(e){d=true;} ok(d,'public key cannot read '+t); }
+for (const f of [`kiosk_app_modem_put('x','{}')`,`kiosk_app_modem_info('x')`,`kiosk_app_modem_msg('x','weekly')`,`kiosk_app_modem_parts('x', current_date)`,`kiosk_app_modem_cum_at('x', now())`]) {
+  let d=false; try{ await c.query(`select public.${f}`);}catch(e){d=true;} ok(d,'public key cannot run '+f.split('(')[0]);
+}
+{ const r=(await c.query(`select public.kiosk_app_modem_set('000000','x','{"add_gb":"16"}') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no yard load change'); }
 await c.query(`reset role`);
 // rollback
 await c.query(fs.readFileSync('./kiosk-app-rollback.sql','utf8'));

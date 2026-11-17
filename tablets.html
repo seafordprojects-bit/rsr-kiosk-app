@@ -98,7 +98,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-16b';
+const PAGE_VERSION = 'v2026-11-17a';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -107,7 +107,7 @@ let timer = null;
 const sending = {};
 const NAMES = { reload: 'Reload page', hard_reload: 'Full reload', update: 'Update app', screen_on: 'Screen on',
   screenshot: 'Screenshot', screen_off: 'Screen off', open_settings: 'Open settings', restart: 'Restart tablet', schedule: 'Set schedule',
-  retry_punches: 'Retry stuck punches', set_wifi: 'Set Wi-Fi' };
+  retry_punches: 'Retry stuck punches', set_wifi: 'Set Wi-Fi', read_modem: 'Read modem now' };
 const FAST_MS = 3000, SLOW_MS = 20000;
 function schedule(fast) {
   clearTimeout(timer);
@@ -259,7 +259,7 @@ function render(rows) {
         <div class="stat"><b>${phone ? 'Roll-call page version' : 'Kiosk page version'}</b>${t.page_version ? esc(t.page_version) : '<span class="mute">not reported yet</span>'}</div>
         <div class="stat"><b>Last page error</b>${t.page_error ? '<span class="err">' + esc(t.page_error) + '</span><br><span class="mute">' + hhmm(t.page_error_at) + ' (' + ago(t.page_error_at) + ')</span>' : 'none'}</div>
       </div>
-      ${phone ? '' : punchesHtml(t) + netHtml(t) + simHtml(t)}
+      ${phone ? '' : punchesHtml(t) + netHtml(t) + simHtml(t) + modemHtml(t)}
       <div class="mute" style="margin:10px 0">Last command: ${last}</div>
       <div class="btns">
         ${cmdBtn(t, 'reload', 'Reload page', '', 'primary')}
@@ -351,6 +351,62 @@ function simHtml(t) {
       <button onclick="askSim('${id}','${esc(s.provider || '')}','${esc(s.close_days || '')}')">SIM settings</button>
     </div>
   </div>`;
+}
+
+// ---- build-7: yard WiFi modem load (PLDT prepaid, read by the tablet; owner 2026-11-17) -------------
+const gb = v => v == null ? '-' : (+v).toFixed(+v >= 10 ? 1 : 2).replace(/\.?0+$/, '') + ' GB';
+function modemHtml(t) {
+  const m = t.modem, id = esc(t.device_id), err = t.modem_err ? '<div class="mute">Last read problem: ' + esc(t.modem_err) + '</div>' : '';
+  const btns = `<div class="btns" style="margin-top:8px">
+      <button class="primary" onclick="askModemLoad('${id}')">Record yard load</button>
+      ${m && m.load_gb != null ? `<button onclick="askModemLeft('${id}')">Correct GB left</button>` : ''}
+      ${cmdBtn(t, 'read_modem', 'Read modem now')}
+      ${m && m.load_gb != null ? `<button onclick="askModemTest('${id}')">Test days</button>` : ''}
+    </div>`;
+  if (!m) return `<div class="sect"><h3>Yard WiFi load (PLDT modem)</h3>
+    <div class="mute">Not read yet. The tablet reads the modem by itself while it is on the PLDT WiFi (app build with modem reading).</div>${err}${btns}</div>`;
+  let load = '<div class="warnbox">No yard load recorded yet - tap Record yard load (the GB you loaded) so the load left can be watched.</div>';
+  if (m.load_gb != null) {
+    const left = +m.left_gb, col = left < 5 ? 'var(--bad)' : left < 10 ? 'var(--warn)' : 'inherit';
+    load = `<div>Load left: <b style="color:${col};font-size:18px">about ${esc(gb(Math.max(left, 0)))}</b> of ${esc(gb(m.load_gb))}
+        <span class="mute">(recorded ${esc(dmy(m.load_date))})</span></div>
+      <div>Used since the load: <b>${esc(gb(m.used_since_load_gb))}</b>${m.gb_per_day != null ? ' - about ' + esc(gb(m.gb_per_day)) + ' a day' + (m.days_to_empty != null ? ', <b>' + esc(m.days_to_empty) + ' days</b> to empty' : '') : ''}</div>
+      <div class="mute">Alerts on Telegram below 20, 10 and 5 GB left${m.alerted_gb ? ' (below ' + esc(m.alerted_gb) + ' GB already sent)' : ''}.
+        ${m.mode === 'test' ? 'TEST day ' + esc(m.test_day) + ' of ' + esc(m.test_days) + ': a usage line every evening after 7:10 PM.' : 'Weekly report: Mondays after 10 AM.'}</div>`;
+  }
+  return `<div class="sect"><h3>Yard WiFi load (PLDT modem)</h3>
+    ${load}
+    <div>Used today: <b>${esc(gb(m.used_today_gb))}</b> - last 7 days: <b>${esc(gb(m.used_7d_gb))}</b></div>
+    <div class="mute">Last modem read ${m.last_read_at ? esc(hhmm(m.last_read_at)) + ' (' + esc(ago(m.last_read_at)) + ')' : '-'}
+      ${m.restarts ? ' - modem restarted ' + esc(m.restarts) + 'x since the load (figure may be a bit low)' : ''}
+      ${m.inbox != null ? ' - ' + esc(m.inbox) + ' texts in the modem' : ''}</div>
+    ${m.inbox >= 450 ? '<div class="warnbox">Modem inbox almost full: delete old texts at https://192.168.1.1 &gt; Tools &gt; SMS (on the yard WiFi).</div>' : ''}
+    ${err}${btns}</div>`;
+}
+function modemSet(device, body, okText) {
+  rpc('kiosk_app_modem_set', { p_passcode: passcode, p_device: device, p: body })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show(okText, 'ok'); load(); } })
+    .catch(e => show('Not saved: ' + e.message, 'err'));
+}
+function askModemLoad(device) {
+  const g = prompt('Yard WiFi load (PLDT modem SIM): how many GB did you load?\nExample: 16\n\nNo-expiry data adds up: this is ADDED to what is still left.');
+  if (g == null || !g.trim()) return;
+  if (!/^\d{1,4}(\.\d{1,2})?$/.test(g.trim()) || +g.trim() <= 0) { show('GB must be a number like 16 or 1.5.', 'err'); return; }
+  const d = prompt('Load date (YYYY-MM-DD):', manilaToday());
+  if (d == null) return;
+  modemSet(device, { add_gb: g.trim(), load_date: d.trim() }, 'Yard load recorded: +' + g.trim() + ' GB.');
+}
+function askModemLeft(device) {
+  const g = prompt('The TRUE GB left (for example seen in the Smart app or a Smart text):');
+  if (g == null || !g.trim()) return;
+  if (!/^\d{1,4}(\.\d{1,2})?$/.test(g.trim())) { show('GB must be a number like 12.5.', 'err'); return; }
+  modemSet(device, { left_gb: g.trim() }, 'GB left corrected.');
+}
+function askModemTest(device) {
+  const d = prompt('TEST period: a usage line on Telegram every evening for how many days, starting today?\n0 = stop the test (weekly report on Mondays only).', '14');
+  if (d == null || !d.trim()) return;
+  if (!/^\d{1,2}$/.test(d.trim()) || +d.trim() > 60) { show('Days must be 0 to 60.', 'err'); return; }
+  modemSet(device, { test_days: d.trim() }, +d.trim() ? 'Test set for ' + d.trim() + ' days.' : 'Test ended - weekly reports.');
 }
 
 function askWifi(device) {

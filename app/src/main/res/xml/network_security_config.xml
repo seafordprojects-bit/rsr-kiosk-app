@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Build-7 (2026-11-17): everything stays https-only, EXCEPT the yard WiFi modem's own local address, whose counter
+     pages only answer in plain http (PLDT Home WiFi / Huawei, read by ModemRead; same list as ModemXml.HOSTS). -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.1.1</domain>
+        <domain includeSubdomains="false">192.168.8.1</domain>
+        <domain includeSubdomains="false">192.168.0.1</domain>
+        <domain includeSubdomains="false">192.168.254.254</domain>
+    </domain-config>
+</network-security-config>

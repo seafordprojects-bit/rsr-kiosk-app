@@ -178,7 +178,18 @@ final class Core {
         // a second push 30 s later, after Wi-Fi has had time to reconnect from sleep
         main.postDelayed(() -> { Host h = host.get(); if (h != null) h.nudgePage(); }, 33_000);
         bg.postDelayed(this::beat, 5000);
+        // build-7: read the yard WiFi modem at this report time (the CPU is already up; no extra wake-up)
+        bg.postDelayed(() -> modemRead(true), 40_000);
+        bg.postDelayed(this::beat, 60_000);
         scheduleReportAlarm();
+    }
+
+    // ---- build-7: yard WiFi modem load (PLDT prepaid; owner 2026-11-17) -----------------------------
+    /** Never on the roll-call phone; never in a punch rush, within 60 s of a touch, or on battery at 20% or less. */
+    void modemRead(boolean force) {
+        if (prefs.phone()) return;
+        ModemRead.request(ctx, force, () -> !inRush() && idleMs() >= 60_000
+                && !(batteryPct() >= 0 && batteryPct() <= 20 && !plugged()));
     }
 
     void start() {
@@ -384,6 +395,7 @@ final class Core {
             checkMaintenanceExpiry();
             checkScheduleTransition();
             nightlyUpdateCheck();
+            modemRead(false);
         } catch (Throwable t) {
             Log.w(TAG, "loop", t);
         }
@@ -417,6 +429,10 @@ final class Core {
             }
             net.addTo(p);
             SimWatch.addTo(ctx, p);   // build-6: connection type, SIM, mobile data used
+            JSONObject modem = ModemRead.pending();   // build-7: the yard modem's counter, when a new read is waiting
+            if (modem != null) p.put("modem", modem);
+            String modemErr = ModemRead.lastError();
+            if (modemErr != null) p.put("modem_err", modemErr);
             JSONObject outage = net.pendingOutage();
             if (outage != null) p.put("outage", outage);
             PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
@@ -448,6 +464,7 @@ final class Core {
                 throw e;
             }
             net.beatOk();
+            if (modem != null) ModemRead.sent(modem);
             if (ev != null && ev.equals(pendingEvent)) pendingEvent = null;
             if (TextQueue.list(ctx).length() > 0) bg.post(this::sendTexts);   // texts that waited for the network
 
@@ -587,6 +604,12 @@ final class Core {
                 ack(id, WifiSetter.apply(ctx, arg));
                 break;
             }
+            case "read_modem":
+                // office button: read the yard modem at the next quiet moment (never in a rush / under a worker's hands)
+                modemRead(true);
+                ack(id, "reading the modem - result in about 1 minute");
+                bg.postDelayed(this::beat, 20_000);
+                break;
             default:
                 ack(id, "unknown command");
         }

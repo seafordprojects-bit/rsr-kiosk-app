@@ -13,13 +13,16 @@ const { chromium } = require('playwright');
       load: { id: 4, provider: 'GOMO', promo: 'GO+99', gb: 25, load_date: '2026-11-01', expires_on: '2026-12-01', source: 'screenshot', days_left: 15, used_mb: 6200, has_shot: true },
       closes_on: '2027-11-01', texts: [{ from: 'GOMO', body: 'Your data is running low <script>x</script>', at: iso(36e5), kind: 'low' }] } };
   const phone = { device_id: 'app-2', name: 'Carmen roll-call phone', phone: true, page_url: 'https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html', online: false, last_seen: iso(36e5), battery: 60, charging: false, events: [] };
-  const carmen = { device_id: 'app-3', name: 'Carmen Kiosk', online: true, last_seen: iso(1e4), battery: 70, charging: true, events: [], net: { type: 'wifi', down_today_min: 0, down_7d_min: 0, periods: [] }, punches: null, sim: { provider: 'DITO', state: 'ready', sms_ok: true, texts: [], load: null } };
-  let saved = null;
+  const carmen = { device_id: 'app-3', name: 'Carmen Kiosk', online: true, last_seen: iso(1e4), battery: 70, charging: true, events: [], net: { type: 'wifi', down_today_min: 0, down_7d_min: 0, periods: [] }, punches: null, sim: { provider: 'DITO', state: 'ready', sms_ok: true, texts: [], load: null },
+    modem: { host: '192.168.1.1', last_read_at: iso(5 * 6e4), inbox: 13, restarts: 1, used_today_gb: 0.35, used_7d_gb: 1.2, load_gb: 16, load_date: '2026-11-17',
+      used_since_load_gb: 6.01, left_gb: 9.99, gb_per_day: 0.8, days_to_empty: 12, alerted_gb: 10, mode: 'test', test_day: 3, test_days: 14 } };
+  let saved = null, modemSaved = null;
   await p.route('https://wpmcbjrisuyjvobvzaus.supabase.co/**', async r => {
     const fn = r.request().url().split('/rpc/')[1], body = JSON.parse(r.request().postData() || '{}');
     let res = {};
     if (fn === 'kiosk_app_list') res = [row, phone, carmen];
     if (fn === 'kiosk_app_load_add') { saved = body.p_load; res = { ok: true, id: 9 }; }
+    if (fn === 'kiosk_app_modem_set') { modemSaved = body; res = { ok: true }; }
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(res) });
   });
   await p.route('https://cdn.jsdelivr.net/**', r => r.abort());
@@ -34,8 +37,17 @@ const { chromium } = require('playwright');
     noScriptInjected: (await p.$$('#list script')).length === 0 && !(await p.innerHTML('#list')).includes('<b>Dela'),
     phoneNoSim: !(await p.innerHTML('#list')).match(/Carmen roll-call phone[\s\S]*?SIM - /) || true,
     carmenNoLoad: txt.includes('No load recorded yet'),
+    modem: txt.includes('Yard WiFi load (PLDT modem)') && txt.includes('about 9.99 GB of 16 GB') && txt.includes('12 days') && txt.includes('TEST day 3 of 14')
+      && txt.includes('13 texts in the modem') && txt.includes('restarted 1x'),
+    modemNotRead: txt.includes('Not read yet. The tablet reads the modem'),
+    modemBtns: (await p.$$('button[data-cmd="read_modem"]')).length === 2,
     retryBtn: (await p.$$('button[data-cmd="retry_punches"]')).length === 1, wifiBtn: (await p.$$('button[data-cmd="set_wifi"]')).length === 3 };
   await p.screenshot({ path: require('os').tmpdir() + '/tab1.png', fullPage: true });
+  // record a yard load (prompts)
+  const answers = ['16', '2026-11-17']; p.on('dialog', d => d.accept(answers.shift()));
+  await p.click('#list .card:nth-child(3) button.primary:has-text("Record yard load")'); await p.waitForTimeout(400);
+  checks.modemSaved = !!modemSaved && modemSaved.p_device === 'app-3' && modemSaved.p.add_gb === '16' && modemSaved.p.load_date === '2026-11-17';
+  p.removeAllListeners('dialog');
   // open record load, no reader (CDN blocked): file -> proof kept, typed details saved
   await p.click('#list .card:nth-child(1) button.primary:has-text("Record load")');
   await p.waitForTimeout(200);

@@ -209,6 +209,55 @@ create table if not exists public.kiosk_app_load_shots (
 revoke all on public.kiosk_app_load_shots from public, anon, authenticated;
 alter table public.kiosk_app_load_shots enable row level security;   -- default closed (data exposure rule 2026-11-16)
 
+-- BUILD-7 (owner 2026-11-17): the yard WiFi modem (PLDT Home WiFi prepaid, Smart Magic Data, Huawei H153-381).
+-- The kiosk app reads the modem's own data counter over the yard WiFi (no modem password: those pages need no login)
+-- and sends it with its heartbeat. The counter starts again from 0 when the modem restarts, so the server keeps its
+-- OWN running total (cum_bytes) and the load left = loaded GB - data used since the load.
+create table if not exists public.kiosk_app_modem (
+  device_id      text primary key,               -- the kiosk tablet that reads this modem
+  host           text,                           -- modem address (192.168.1.1)
+  cum_bytes      bigint not null default 0,      -- running total through the modem since the first read (never goes down)
+  last_total     bigint,                         -- the modem's "Total Volume" at the last read (bytes)
+  last_secs      bigint,                         -- the modem's total connect time at the last read (s)
+  last_read_at   timestamptz,
+  first_read_at  timestamptz,
+  day_bytes      bigint,                         -- the modem's own "used today" / "this month" (shown only)
+  month_bytes    bigint,
+  inbox          integer,                        -- number of texts in the modem (count only; the texts stay in the modem)
+  restarts       integer not null default 0,     -- counter restarts seen since the last load (figure may be a bit low)
+  load_gb        numeric(8,2),                   -- GB available when the load was recorded (no-expiry data adds up)
+  load_date      date,
+  load_at        timestamptz,
+  load_cum       bigint,                         -- cum_bytes at that moment (moved by "Correct GB left")
+  alerted_gb     integer,                        -- lowest alert level already sent for this load (20 / 10 / 5)
+  test_from      date,                           -- TEST period: one Telegram line every evening
+  test_until     date,
+  test_last      date,
+  test_summary   boolean not null default true,
+  weekly_last    date,                           -- WEEKLY: Monday after the 10:01 report
+  read_fail_alerted  boolean not null default false,
+  inbox_full_alerted boolean not null default false
+);
+revoke all on public.kiosk_app_modem from public, anon, authenticated;
+alter table public.kiosk_app_modem enable row level security;   -- default closed (data exposure rule 2026-11-16)
+
+create table if not exists public.kiosk_app_modem_reads (
+  id           bigserial primary key,
+  device_id    text not null,
+  at           timestamptz not null,
+  total_bytes  bigint not null,
+  total_secs   bigint,
+  day_bytes    bigint,
+  inbox        integer,
+  cum_bytes    bigint not null,
+  restarted    boolean not null default false
+);
+create index if not exists kiosk_app_modem_reads_dev on public.kiosk_app_modem_reads (device_id, at desc);
+revoke all on public.kiosk_app_modem_reads from public, anon, authenticated;
+alter table public.kiosk_app_modem_reads enable row level security;   -- default closed (data exposure rule 2026-11-16)
+revoke all on sequence public.kiosk_app_modem_reads_id_seq from public, anon, authenticated;
+alter table public.kiosk_app_devices add column if not exists modem_err text;   -- why the last modem read failed (shown only)
+
 create sequence if not exists public.kiosk_app_cmd_seq;
 revoke all on sequence public.kiosk_app_cmd_seq from anon, authenticated;
 
@@ -388,6 +437,8 @@ begin
     sim_state       = case when p->>'sim_state' in ('ready','absent','locked','unknown') then p->>'sim_state' else k.sim_state end,
     sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
     battery_unrestricted = case when jsonb_typeof(p->'battery_unrestricted') = 'boolean' then (p->>'battery_unrestricted')::boolean else k.battery_unrestricted end,
+    -- BUILD-7: why the last yard-modem read failed (empty = fine), shown on the Tablets page only
+    modem_err       = nullif(left(regexp_replace(coalesce(p->>'modem_err', ''), '[^[:alnum:] ./()-]', '', 'g'), 60), ''),
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -486,6 +537,15 @@ begin
       insert into public.kiosk_app_data_days as x (device_id, day, bytes) values (v_id, public.kiosk_app_text_date(v_day), (p->'mobile_days'->>v_day)::bigint)
       on conflict (device_id, day) do update set bytes = greatest(x.bytes, excluded.bytes);
     end loop;
+  end if;
+  -- BUILD-7 yard WiFi modem counter: only from a tablet that sent its secret; a bad reading never breaks the report
+  if v_tok is not null and v_new is null then
+    if jsonb_typeof(p->'modem') = 'object' then
+      begin
+        perform public.kiosk_app_modem_put(v_id, p->'modem');
+      exception when others then null;
+      end;
+    end if;
   end if;
 
   if d.cmd_id is not null and d.cmd_id > coalesce(d.cmd_done_id, 0)
@@ -621,7 +681,9 @@ begin
                                 'oldest_unsynced_at', h.j->'oldest_unsynced_at', 'reported_at', h.j->'last_seen')
                          from (select to_jsonb(kh) as j from public.kiosk_health kh where kh.device_id = k.kiosk_device_id) h),
            -- BUILD-6: SIM, mobile data, loads, telco texts
-           'sim', public.kiosk_app_sim_info(k.device_id)
+           'sim', public.kiosk_app_sim_info(k.device_id),
+           -- BUILD-7: yard WiFi modem load
+           'modem', public.kiosk_app_modem_info(k.device_id), 'modem_err', k.modem_err
          ) order by k.name), '[]'::jsonb)
     into v from public.kiosk_app_devices k;
   return v;
@@ -640,7 +702,7 @@ begin
     return jsonb_build_object('error', 'wrong passcode');
   end if;
   if p_cmd not in ('reload','hard_reload','restart','update','screen_on','screen_off','open_settings','schedule','screenshot',
-                   'retry_punches','set_wifi') then
+                   'retry_punches','set_wifi','read_modem') then
     return jsonb_build_object('error', 'unknown command');
   end if;
   -- BUILD-6 Set Wi-Fi: arg = {"ssid":"RSR Mandaue","pass":"12345678","switch":true}. The password is removed
@@ -918,6 +980,282 @@ end $$;
 revoke all on function public.kiosk_app_load_shot_get(text, text) from public;
 grant execute on function public.kiosk_app_load_shot_get(text, text) to anon, authenticated;
 
+-- STEP 5f - BUILD-7 yard WiFi modem load (owner 2026-11-17)
+-- running total at a moment: the last read at or before p_t (null when there is none)
+create or replace function public.kiosk_app_modem_cum_at(p_device text, p_t timestamptz)
+returns bigint language sql stable security definer set search_path = public as $$
+  select r.cum_bytes from public.kiosk_app_modem_reads r where r.device_id = p_device and r.at <= p_t order by r.at desc limit 1
+$$;
+revoke all on function public.kiosk_app_modem_cum_at(text, timestamptz) from public, anon, authenticated;
+
+-- bytes -> "1.25" (GB = 1024 x 1024 x 1024 bytes)
+create or replace function public.kiosk_app_gb(p bigint)
+returns text language sql immutable as $$ select coalesce(trim_scale(round(p / 1073741824.0, 2))::text, '?') $$;
+revoke all on function public.kiosk_app_gb(bigint) from public, anon, authenticated;
+
+-- one test day, cut at the report times: 7:10 PM the evening before -> 10:01 AM -> 3:00 PM -> 7:10 PM (bytes)
+create or replace function public.kiosk_app_modem_parts(p_device text, p_day date)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare c0 bigint; c1 bigint; c2 bigint; c3 bigint; v_first bigint;
+begin
+  -- before the very first read nothing is known: count from the first read (0 used before it)
+  select r.cum_bytes into v_first from public.kiosk_app_modem_reads r where r.device_id = p_device order by r.at limit 1;
+  c0 := coalesce(public.kiosk_app_modem_cum_at(p_device, ((p_day - 1) + time '19:10') at time zone 'Asia/Manila'), v_first);
+  c1 := coalesce(public.kiosk_app_modem_cum_at(p_device, (p_day + time '10:01') at time zone 'Asia/Manila'), v_first);
+  c2 := coalesce(public.kiosk_app_modem_cum_at(p_device, (p_day + time '15:00') at time zone 'Asia/Manila'), v_first);
+  c3 := coalesce(public.kiosk_app_modem_cum_at(p_device, (p_day + time '19:10') at time zone 'Asia/Manila'), v_first);
+  return jsonb_build_object('night', c1 - c0, 'am', c2 - c1, 'pm', c3 - c2, 'day', c3 - c0);
+end $$;
+revoke all on function public.kiosk_app_modem_parts(text, date) from public, anon, authenticated;
+
+-- a reading from the tablet (called by kiosk_app_beat after the tablet's secret was checked)
+-- m: {"at":"...Z","host":"192.168.1.1","total_bytes":47319271,"total_secs":21580,"day_bytes":49282023,
+--     "month_bytes":49282023,"month_clear":"2026-11-17","inbox":12}
+create or replace function public.kiosk_app_modem_put(p_device text, m jsonb)
+returns void language plpgsql volatile security definer set search_path = public as $$
+declare
+  v_tot   bigint;
+  v_secs  bigint  := case when m->>'total_secs'  ~ '^[0-9]{1,12}$' then (m->>'total_secs')::bigint end;
+  v_dayb  bigint  := case when m->>'day_bytes'   ~ '^[0-9]{1,15}$' then (m->>'day_bytes')::bigint end;
+  v_monb  bigint  := case when m->>'month_bytes' ~ '^[0-9]{1,15}$' then (m->>'month_bytes')::bigint end;
+  v_inbox integer := case when m->>'inbox' ~ '^[0-9]{1,5}$' then (m->>'inbox')::integer end;
+  v_host  text    := case when m->>'host' in ('192.168.1.1','192.168.8.1','192.168.0.1','192.168.254.254') then m->>'host' end;
+  v_at    timestamptz := public.kiosk_app_ts(m->>'at');
+  v_delta bigint;
+  v_rst   boolean := false;
+  v_cum   bigint;
+  x       public.kiosk_app_modem%rowtype;
+  v_nm    text;
+  v_left  numeric;
+  v_lvl   integer;
+begin
+  if coalesce(m->>'total_bytes', '') !~ '^[0-9]{1,15}$' then return; end if;
+  v_tot := (m->>'total_bytes')::bigint;
+  if v_at is null or v_at > now() + interval '2 minutes' or v_at < now() - interval '1 day' then v_at := now(); end if;
+  insert into public.kiosk_app_modem as y (device_id) values (p_device) on conflict (device_id) do nothing;
+  select * into x from public.kiosk_app_modem y where y.device_id = p_device for update;
+  if x.last_read_at is not null and v_at <= x.last_read_at then return; end if;   -- an old or repeated read
+  if x.last_total is null then
+    v_delta := 0;                          -- first read: only the starting point
+  elsif coalesce(v_host, x.host) is distinct from x.host or v_tot < x.last_total
+        or (v_secs is not null and x.last_secs is not null and v_secs < x.last_secs) then
+    v_delta := v_tot; v_rst := true;       -- the modem restarted (its counter began again at 0): all of it is new
+  else
+    v_delta := v_tot - x.last_total;
+  end if;
+  v_cum := x.cum_bytes + v_delta;
+  update public.kiosk_app_modem y set
+    host = coalesce(v_host, y.host), cum_bytes = v_cum, last_total = v_tot, last_secs = v_secs, last_read_at = v_at,
+    first_read_at = coalesce(y.first_read_at, v_at), day_bytes = v_dayb, month_bytes = v_monb,
+    inbox = coalesce(v_inbox, y.inbox),
+    restarts = y.restarts + case when v_rst and y.load_gb is not null then 1 else 0 end,
+    read_fail_alerted = false,
+    inbox_full_alerted = case when v_inbox is null then y.inbox_full_alerted when v_inbox < 400 then false else y.inbox_full_alerted end
+   where y.device_id = p_device;
+  insert into public.kiosk_app_modem_reads (device_id, at, total_bytes, total_secs, day_bytes, inbox, cum_bytes, restarted)
+  values (p_device, v_at, v_tot, v_secs, v_dayb, v_inbox, v_cum, v_rst);
+
+  select coalesce(nullif(k.name, ''), p_device) into v_nm from public.kiosk_app_devices k where k.device_id = p_device;
+  -- load left: alert AT ONCE when it drops below 20, 10 and 5 GB (each level once per load)
+  if x.load_gb is not null then
+    v_left := x.load_gb - (v_cum - x.load_cum) / 1073741824.0;
+    v_lvl := case when v_left < 5 then 5 when v_left < 10 then 10 when v_left < 20 then 20 end;
+    if v_lvl is not null and v_lvl < coalesce(x.alerted_gb, 1000) then
+      update public.kiosk_app_modem y set alerted_gb = v_lvl where y.device_id = p_device;
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || ' - YARD WIFI LOAD: about ' || trim_scale(round(greatest(v_left, 0), 1))
+              || ' GB left of ' || trim_scale(x.load_gb) || ' GB (below ' || v_lvl || ' GB).'
+              || case when v_lvl = 5 then ' LOAD NOW (GCash / Maya, the modem number), then record it on the Tablets page.' else '' end
+              || ' Used since ' || to_char(x.load_date, 'Mon DD') || ': ' || public.kiosk_app_gb(v_cum - x.load_cum) || ' GB.');
+    end if;
+  end if;
+  -- a new text in the modem (load confirmation, Smart advisory): the count only - the text stays in the modem
+  if v_inbox is not null and x.inbox is not null and v_inbox > x.inbox then
+    perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || ' - the yard WiFi modem received ' || (v_inbox - x.inbox)
+            || ' new text' || case when v_inbox - x.inbox > 1 then 's' else '' end || ' (' || v_inbox
+            || ' in its inbox). To read: on the yard WiFi open https://192.168.1.1 > Tools > SMS.');
+  end if;
+  if v_inbox >= 450 and not x.inbox_full_alerted then
+    update public.kiosk_app_modem y set inbox_full_alerted = true where y.device_id = p_device;
+    perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || ' - the yard WiFi modem inbox is almost full (' || v_inbox
+            || ' of 500 texts). Delete old texts (https://192.168.1.1 > Tools > SMS), or new load texts cannot come in.');
+  end if;
+end $$;
+revoke all on function public.kiosk_app_modem_put(text, jsonb) from public, anon, authenticated;
+
+-- the Telegram lines of the TEST period, its summary and the WEEKLY report (the tick decides when)
+create or replace function public.kiosk_app_modem_msg(p_device text, p_kind text)
+returns text language plpgsql stable security definer set search_path = public as $$
+declare
+  x       public.kiosk_app_modem%rowtype;
+  v_nm    text;
+  v_today date := (now() at time zone 'Asia/Manila')::date;
+  v_left  numeric;
+  v_parts jsonb;
+  v_rate  numeric;
+  v_avg   numeric;
+  v_max   bigint;
+  v_night numeric;
+  v_maxday date;
+  v_wk    bigint;
+  v_rst   integer;
+begin
+  select * into x from public.kiosk_app_modem y where y.device_id = p_device;
+  if not found or x.load_gb is null then return null; end if;
+  select coalesce(nullif(k.name, ''), p_device) into v_nm from public.kiosk_app_devices k where k.device_id = p_device;
+  v_left := greatest(x.load_gb - (x.cum_bytes - x.load_cum) / 1073741824.0, 0);
+  if p_kind = 'test' then
+    v_parts := public.kiosk_app_modem_parts(p_device, v_today);
+    v_rate := (x.cum_bytes - x.load_cum) / 1073741824.0 / greatest(extract(epoch from now() - x.load_at) / 86400.0, 1);
+    return 'RSR Kiosk: ' || v_nm || ' - Yard WiFi TEST day ' || (v_today - x.test_from + 1) || ' of '
+           || (x.test_until - x.test_from + 1) || ': used ' || public.kiosk_app_gb((v_parts->>'day')::bigint)
+           || ' GB since 7:10 PM yesterday (night to 10 AM ' || public.kiosk_app_gb((v_parts->>'night')::bigint)
+           || ', 10 AM-3 PM ' || public.kiosk_app_gb((v_parts->>'am')::bigint)
+           || ', 3-7:10 PM ' || public.kiosk_app_gb((v_parts->>'pm')::bigint) || '). About '
+           || trim_scale(round(v_left, 1)) || ' GB left'
+           || case when v_rate > 0.01 then ', about ' || floor(v_left / v_rate) || ' days at this rate' else '' end
+           || '.' || case when x.restarts > 0 then ' Modem restarted ' || x.restarts || 'x since the load (figure may be a bit low).' else '' end;
+  elsif p_kind = 'summary' then
+    select avg((p.j->>'day')::bigint), max((p.j->>'day')::bigint), avg((p.j->>'night')::bigint),
+           (array_agg(p.d order by (p.j->>'day')::bigint desc nulls last))[1]
+      into v_avg, v_max, v_night, v_maxday
+      from (select g::date as d, public.kiosk_app_modem_parts(p_device, g::date) as j
+              from generate_series(x.test_from, x.test_until, interval '1 day') g) p;
+    return 'RSR Kiosk: ' || v_nm || ' - Yard WiFi TEST finished (' || (x.test_until - x.test_from + 1)
+           || ' days): average ' || public.kiosk_app_gb(round(v_avg)::bigint) || ' GB a day, highest '
+           || public.kiosk_app_gb(v_max) || ' GB (' || coalesce(to_char(v_maxday, 'Mon DD'), '?') || '), night (7:10 PM-10 AM) average '
+           || public.kiosk_app_gb(round(v_night)::bigint) || ' GB. About ' || trim_scale(round(v_left, 1)) || ' GB left'
+           || case when v_avg > 0 then ', about ' || floor(v_left / (v_avg / 1073741824.0)) || ' days at this rate' else '' end
+           || '.' || case when v_night > 0.3 * 1073741824 then ' Night use is HIGH: something else is using the WiFi at night (check Devices on the modem).' else '' end
+           || ' From now on: one report every Monday.';
+  elsif p_kind = 'weekly' then
+    v_wk := greatest(x.cum_bytes - coalesce(public.kiosk_app_modem_cum_at(p_device, now() - interval '7 days'), x.load_cum), 0);
+    select count(*) into v_rst from public.kiosk_app_modem_reads r where r.device_id = p_device and r.restarted and r.at > now() - interval '7 days';
+    return 'RSR Kiosk: ' || v_nm || ' - Yard WiFi weekly: used ' || public.kiosk_app_gb(v_wk)
+           || ' GB in the last 7 days. About ' || trim_scale(round(v_left, 1)) || ' GB left'
+           || case when v_wk > 0 then ', about ' || floor(v_left / (v_wk / 1073741824.0)) || ' weeks at this rate' else '' end
+           || '.' || case when v_rst > 0 then ' Modem restarted ' || v_rst || 'x this week (figure may be a bit low).' else '' end;
+  end if;
+  return null;
+end $$;
+revoke all on function public.kiosk_app_modem_msg(text, text) from public, anon, authenticated;
+
+-- what the Tablets page shows (inside kiosk_app_list, admin passcode)
+create or replace function public.kiosk_app_modem_info(p_device text)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare
+  x       public.kiosk_app_modem%rowtype;
+  v_today date := (now() at time zone 'Asia/Manila')::date;
+  v_first bigint;
+  v_used  bigint;
+  v_left  numeric;
+  v_days  numeric;
+  v_rate  numeric;
+begin
+  select * into x from public.kiosk_app_modem y where y.device_id = p_device;
+  if not found then return null; end if;
+  select r.cum_bytes into v_first from public.kiosk_app_modem_reads r where r.device_id = p_device order by r.at limit 1;
+  if x.load_gb is not null then
+    v_used := x.cum_bytes - x.load_cum;
+    v_left := x.load_gb - v_used / 1073741824.0;
+    v_days := extract(epoch from now() - x.load_at) / 86400.0;
+    if v_days >= 1 and v_used > 0 then v_rate := v_used / 1073741824.0 / v_days; end if;
+  end if;
+  return jsonb_build_object(
+    'host', x.host, 'last_read_at', x.last_read_at, 'inbox', x.inbox, 'restarts', x.restarts,
+    'used_today_gb', round((x.cum_bytes - coalesce(public.kiosk_app_modem_cum_at(p_device, v_today::timestamp at time zone 'Asia/Manila'), v_first)) / 1073741824.0, 2),
+    'used_7d_gb', round((x.cum_bytes - coalesce(public.kiosk_app_modem_cum_at(p_device, now() - interval '7 days'), v_first)) / 1073741824.0, 2),
+    'modem_day_gb', round(x.day_bytes / 1073741824.0, 2),
+    'load_gb', x.load_gb, 'load_date', x.load_date,
+    'used_since_load_gb', round(v_used / 1073741824.0, 2),
+    'left_gb', round(v_left, 2),
+    'gb_per_day', round(v_rate, 2),
+    'days_to_empty', case when v_rate > 0 then floor(greatest(v_left, 0) / v_rate) end,
+    'alerted_gb', x.alerted_gb,
+    'mode', case when x.test_until >= v_today then 'test' else 'weekly' end,
+    'test_day', case when x.test_until >= v_today then v_today - x.test_from + 1 end,
+    'test_days', case when x.test_until >= v_today then x.test_until - x.test_from + 1 end);
+end $$;
+revoke all on function public.kiosk_app_modem_info(text) from public, anon, authenticated;
+
+-- office (admin passcode): {"add_gb":"16","load_date":"2026-11-17","test_days":"14"}  record a load (adds to what is left:
+-- Magic Data has no expiry) | {"left_gb":"12.5"} the true GB left (e.g. seen in the Smart app) | {"test_days":"7"} restart
+-- the test period from today (0 = end it, weekly reports only)
+create or replace function public.kiosk_app_modem_set(p_passcode text, p_device text, p jsonb)
+returns jsonb language plpgsql volatile security definer set search_path = public as $$
+declare
+  x       public.kiosk_app_modem%rowtype;
+  v_today date := (now() at time zone 'Asia/Manila')::date;
+  v_ld    date;
+  v_add   numeric;
+  v_left  numeric;
+  v_now   numeric;
+  v_td    integer;
+  v_log   text;
+begin
+  if not public.admin_verify_passcode(p_passcode) then
+    return jsonb_build_object('error', 'wrong passcode');
+  end if;
+  if not exists (select 1 from public.kiosk_app_devices k where k.device_id = p_device) then
+    return jsonb_build_object('error', 'tablet not found');
+  end if;
+  if jsonb_typeof(p) <> 'object' then return jsonb_build_object('error', 'nothing to save'); end if;
+  if p ? 'test_days' then
+    if coalesce(p->>'test_days', '') !~ '^[0-9]{1,2}$' or (p->>'test_days')::int > 60 then
+      return jsonb_build_object('error', 'test days must be 0 to 60');
+    end if;
+    v_td := (p->>'test_days')::int;
+  end if;
+  insert into public.kiosk_app_modem as y (device_id) values (p_device) on conflict (device_id) do nothing;
+  select * into x from public.kiosk_app_modem y where y.device_id = p_device for update;
+
+  if p ? 'add_gb' then
+    if coalesce(p->>'add_gb', '') !~ '^[0-9]{1,4}(\.[0-9]{1,2})?$' or (p->>'add_gb')::numeric <= 0 then
+      return jsonb_build_object('error', 'GB loaded must be a number like 16 or 1.5');
+    end if;
+    v_add := (p->>'add_gb')::numeric;
+    v_ld := coalesce(public.kiosk_app_text_date(p->>'load_date'), v_today);
+    if v_ld > v_today or v_ld < v_today - 60 then
+      return jsonb_build_object('error', 'load date must be today or up to 60 days back');
+    end if;
+    -- no-expiry data adds up: what is still left + the new load
+    v_now := case when x.load_gb is null then 0 else greatest(0, x.load_gb - (x.cum_bytes - x.load_cum) / 1073741824.0) end;
+    if v_td is null and x.test_from is null then v_td := 14; end if;   -- the first load starts the 14-day test
+    update public.kiosk_app_modem y set load_gb = round(v_now + v_add, 2), load_date = v_ld, load_at = now(),
+           load_cum = y.cum_bytes, alerted_gb = null, restarts = 0
+     where y.device_id = p_device;
+    v_log := 'office: yard WiFi load +' || trim_scale(v_add) || ' GB (' || to_char(v_ld, 'YYYY-MM-DD') || '), now about '
+             || trim_scale(round(v_now + v_add, 2)) || ' GB';
+  elsif p ? 'left_gb' then
+    if coalesce(p->>'left_gb', '') !~ '^[0-9]{1,4}(\.[0-9]{1,2})?$' then
+      return jsonb_build_object('error', 'GB left must be a number like 12.5');
+    end if;
+    if x.load_gb is null then return jsonb_build_object('error', 'record a load first'); end if;
+    v_left := (p->>'left_gb')::numeric;
+    update public.kiosk_app_modem y set load_gb = greatest(y.load_gb, v_left),
+           load_cum = y.cum_bytes - round((greatest(y.load_gb, v_left) - v_left) * 1073741824),
+           -- already "below" levels are not alerted again for the corrected figure
+           alerted_gb = case when v_left < 5 then 5 when v_left < 10 then 10 when v_left < 20 then 20 end
+     where y.device_id = p_device;
+    v_log := 'office: yard WiFi GB left corrected to ' || trim_scale(v_left) || ' GB';
+  end if;
+
+  if v_td is not null then
+    if v_td = 0 then
+      update public.kiosk_app_modem y set test_until = null, test_summary = true where y.device_id = p_device;
+    else
+      update public.kiosk_app_modem y set test_from = v_today, test_until = v_today + v_td - 1, test_last = null, test_summary = false
+       where y.device_id = p_device;
+    end if;
+    v_log := coalesce(v_log || ', ', 'office: ') || case when v_td = 0 then 'yard WiFi test ended (weekly reports)'
+                                                         else 'yard WiFi test ' || v_td || ' days from today' end;
+  end if;
+  if v_log is null then return jsonb_build_object('error', 'nothing to save'); end if;
+  insert into public.kiosk_app_events (device_id, event, notified) values (p_device, left(v_log, 120), true);
+  return jsonb_build_object('ok', true);
+end $$;
+revoke all on function public.kiosk_app_modem_set(text, text, jsonb) from public;
+grant execute on function public.kiosk_app_modem_set(text, text, jsonb) to anon, authenticated;
+
 -- STEP 6a - "1 h 25 min" style text for alerts
 create or replace function public.kiosk_app_dur(p interval)
 returns text language sql immutable as $$
@@ -1128,6 +1466,7 @@ declare
   v_alrt  jsonb;
   v_txt   text;
   tx      record;
+  mm      record;     -- BUILD-7 yard WiFi modem
 begin
   v_work := (v_min >= 6*60 and v_min < 22*60);
   v_day8 := (v_min >= 8*60 and v_min < 20*60);
@@ -1468,6 +1807,34 @@ begin
     exit when v_sent >= 5;
     if public.kiosk_app_sms_alert(tx.id) then v_sent := v_sent + 1; end if;
   end loop;
+  -- BUILD-7 yard WiFi modem: reads stopped / TEST evening line / end-of-test summary / WEEKLY Monday line
+  for mm in select x.*, coalesce(nullif(k.name, ''), x.device_id) as nm, k.last_seen as seen, k.modem_err as err
+              from public.kiosk_app_modem x join public.kiosk_app_devices k on k.device_id = x.device_id loop
+    if mm.last_read_at < now() - interval '2 days' and mm.seen > now() - interval '30 minutes' and not mm.read_fail_alerted then
+      update public.kiosk_app_modem y set read_fail_alerted = true where y.device_id = mm.device_id;
+      perform public.kiosk_alert_send('RSR Kiosk: ' || mm.nm || ' - the yard WiFi modem has not been read for 2 days ('
+              || coalesce(mm.err, 'no reason given') || '). The load left is not being watched: check that the tablet is on the PLDT WiFi.');
+    end if;
+    continue when mm.load_gb is null;
+    -- TEST: one line every evening, after the 7:10 PM report
+    if mm.test_until is not null and v_today between mm.test_from and mm.test_until and v_min >= 19*60 + 15
+       and mm.test_last is distinct from v_today then
+      update public.kiosk_app_modem y set test_last = v_today where y.device_id = mm.device_id;
+      perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'test'));
+    end if;
+    -- end of the test: summary once, then weekly
+    if mm.test_until is not null and v_today > mm.test_until and not mm.test_summary then
+      update public.kiosk_app_modem y set test_summary = true where y.device_id = mm.device_id;
+      perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'summary'));
+    end if;
+    -- WEEKLY (outside the test): Monday after the 10:01 report
+    if (mm.test_until is null or v_today > mm.test_until) and extract(isodow from v_today) = 1 and v_min >= 10*60 + 5
+       and mm.weekly_last is distinct from v_today then
+      update public.kiosk_app_modem y set weekly_last = v_today where y.device_id = mm.device_id;
+      perform public.kiosk_alert_send(public.kiosk_app_modem_msg(mm.device_id, 'weekly'));
+    end if;
+  end loop;
+
   -- a Wi-Fi password never waits on the server longer than the command itself (30 min)
   update public.kiosk_app_devices set cmd_arg = null
    where cmd = 'set_wifi' and cmd_arg is not null and cmd_at < now() - interval '30 minutes';
@@ -1487,6 +1854,10 @@ begin
   delete from public.kiosk_app_data_days where day < v_today - 400;
   delete from public.kiosk_app_sms where received_at < now() - interval '180 days' and load_id is null;
   delete from public.kiosk_app_sms where kind = 'otp' and created_at < now() - interval '15 minutes';   -- codes never kept
+  -- BUILD-7: modem reads kept 120 days (weekly figures and the test need a few weeks); a forgotten tablet's after 30
+  delete from public.kiosk_app_modem_reads where at < now() - interval '120 days';
+  delete from public.kiosk_app_modem_reads mr where not exists (select 1 from public.kiosk_app_devices d where d.device_id = mr.device_id)
+     and mr.at < now() - interval '30 days';
 end $$;
 revoke all on function public.kiosk_app_tick() from public, anon, authenticated;
 
@@ -1513,3 +1884,11 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
                               'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;
+-- build-7 check (yard WiFi modem): expect 2 tables, 8 functions, 1 column
+select (select count(*) from information_schema.tables where table_schema = 'public'
+          and table_name in ('kiosk_app_modem','kiosk_app_modem_reads')) as build7_tables,
+       (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
+          and proname in ('kiosk_app_modem_cum_at','kiosk_app_gb','kiosk_app_modem_parts','kiosk_app_modem_put',
+                          'kiosk_app_modem_info','kiosk_app_modem_set','kiosk_app_modem_msg','kiosk_app_tick')) as build7_functions,
+       (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
+          and column_name = 'modem_err') as build7_columns;
