@@ -28,6 +28,19 @@ const { chromium } = require('playwright');
   await p.route('https://cdn.jsdelivr.net/**', r => r.abort());
   await p.goto('file://' + require('path').resolve(__dirname, '../tablets.html'));
   await p.fill('#pc', '123456'); await p.click('#go'); await p.waitForTimeout(800);
+  const early = {};
+  // redesign 2026-11-18: status first - overview, what needs attention, tiles; problem parts open by themselves
+  const pre = await p.textContent('#list');
+  early.overview = pre.includes('3tablets') && pre.includes('2online') && pre.includes('2need attention');
+  early.attention = pre.includes('1 stuck punch (will not sync by themselves)') && pre.includes('On MOBILE DATA (Wi-Fi down)') && pre.includes('Yard WiFi load under 10 GB');
+  early.phoneAllGood = await p.isVisible('#list > :nth-child(2 of .card) .pill.ok');
+  early.problemOpen = await p.isVisible('#list > :nth-child(1 of .card) button[data-cmd="retry_punches"]');
+  early.quietClosed = !(await p.isVisible('#list > :nth-child(1 of .card) button[data-cmd="restart"]'));
+  early.restartInDanger = (await p.$$('.danger-zone button[data-cmd="restart"]')).length === 3;
+  await p.click('#list > :nth-child(1 of .card) .tile:has-text("SIM GOMO")'); await p.waitForTimeout(500);
+  early.tileOpensPart = await p.isVisible('#list > :nth-child(1 of .card) button:has-text("I just loaded")');
+  // redesign 2026-11-18: parts are folded; open every part (as the owner would tap them) before reading the texts
+  await p.evaluate(() => { for (const d of document.querySelectorAll('#list details')) d.open = true; });
   const txt = await p.textContent('#list');
   const checks = {
     stuck: txt.includes('1 stuck (refused by the server)'), waiting: txt.includes('3 waiting to sync'),
@@ -37,19 +50,27 @@ const { chromium } = require('playwright');
     noScriptInjected: (await p.$$('#list script')).length === 0 && !(await p.innerHTML('#list')).includes('<b>Dela'),
     phoneNoSim: !(await p.innerHTML('#list')).match(/Carmen roll-call phone[\s\S]*?SIM - /) || true,
     carmenNoLoad: txt.includes('No load recorded yet'),
-    modem: txt.includes('Yard WiFi load (PLDT modem)') && txt.includes('about 9.99 GB of 16 GB') && txt.includes('12 days') && txt.includes('TEST day 3 of 14')
+    modem: txt.includes('Yard WiFi load') && txt.includes('about 9.99 GB of 16 GB') && txt.includes('12 days') && txt.includes('TEST day 3 of 14')
       && txt.includes('13 texts in the modem') && txt.includes('restarted 1x'),
-    modemNotRead: txt.includes('Not read yet. The tablet reads the modem'),
+    modemNotRead: txt.includes('Not read yet. The tablet reads the PLDT modem'),
     modemBtns: (await p.$$('button[data-cmd="read_modem"]')).length === 2,
     retryBtn: (await p.$$('button[data-cmd="retry_punches"]')).length === 1, wifiBtn: (await p.$$('button[data-cmd="set_wifi"]')).length === 3 };
+  Object.assign(checks, early);
   await p.screenshot({ path: require('os').tmpdir() + '/tab1.png', fullPage: true });
   // record a yard load (prompts)
   const answers = ['16', '2026-11-17']; p.on('dialog', d => d.accept(answers.shift()));
-  await p.click('#list .card:nth-child(3) button.primary:has-text("Record yard load")'); await p.waitForTimeout(400);
+  await p.click('#list > :nth-child(3 of .card) button.primary:has-text("Record yard load")'); await p.waitForTimeout(400);
   checks.modemSaved = !!modemSaved && modemSaved.p_device === 'app-3' && modemSaved.p.add_gb === '16' && modemSaved.p.load_date === '2026-11-17';
   p.removeAllListeners('dialog');
   // open record load, no reader (CDN blocked): file -> proof kept, typed details saved
-  await p.click('#list .card:nth-child(1) button.primary:has-text("Record load")');
+  // the owner taps the folded "SIM - GOMO" part open (it stays open across refreshes), then Record load
+  await p.click('#list > :nth-child(1 of .card) summary:has-text("SIM - GOMO")'); await p.waitForTimeout(100);   // tile opened it: tap closes
+  checks.partCloses = !(await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")'));
+  await p.click('#list > :nth-child(1 of .card) summary:has-text("SIM - GOMO")'); await p.waitForTimeout(100);
+  checks.partOpens = await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');
+  await p.evaluate(() => load()); await p.waitForTimeout(300);
+  checks.partStaysOpen = await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');
+  await p.click('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');
   await p.waitForTimeout(200);
   checks.modal = await p.isVisible('#loadBox');
   checks.prefilled = (await p.inputValue('#lProv')) === 'GOMO' && /^\d{4}-\d{2}-\d{2}$/.test(await p.inputValue('#lDate'));
