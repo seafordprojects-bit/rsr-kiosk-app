@@ -44,7 +44,8 @@ final class ModemXml {
         Reading r = parse(traffic, month, sms);
         if (r == null || status == null || status.contains("<error>")) return r;
         long sim = num(status, "SimStatus");
-        if (sim >= 0) r.sim = sim == 1 ? "ok" : "missing";
+        if (sim == 1) r.sim = "ok";
+        else if (sim == 255) r.sim = "missing";   // other values (0, PIN while starting): unknown, no alarm
         long cs = num(status, "ConnectionStatus");
         if (cs >= 0) r.conn = cs == 901 ? "connected" : "disconnected";
         return r;

@@ -327,7 +327,7 @@ function issues(t) {
   if (t.modem_err && m && m.load_gb != null) add('warn', 'Modem read problem: ' + t.modem_err, 'modem');
   if (m && m.load_gb == null) add('warn', 'Yard WiFi load not recorded yet', 'modem');
   if (m && m.sim === 'missing') add('bad', 'Yard WiFi modem SIM MISSING or not working', 'modem');
-  if (s.state === 'absent') add('bad', 'No SIM in the tablet (removed?) - no backup internet', 'sim');
+  if (s.provider && (s.state === 'absent' || s.state === 'locked')) add('bad', 'SIM ' + (s.state === 'locked' ? 'LOCKED / replaced' : 'MISSING') + ' in the tablet - no backup internet', 'sim');
   return out;
 }
 const lvlOf = (iss, sec) => iss.some(x => x.sec === sec && x.lvl === 'bad') ? 'bad' : iss.some(x => x.sec === sec) ? 'warn' : '';

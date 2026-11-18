@@ -53,6 +53,8 @@ public class ModemXmlTest {
         r = ModemXml.parse(TRAFFIC, MONTH, SMS, ERR);
         ok(r != null && r.sim.isEmpty() && r.conn.isEmpty() && r.totalBytes > 0, "status needs a login: SIM unknown, counter still read");
         ok(ModemXml.parse(ERR, MONTH, SMS, ST) == null, "no counter: no reading at all");
+        r = ModemXml.parse(TRAFFIC, MONTH, SMS, "<response><SimStatus>0</SimStatus></response>");
+        ok(r != null && r.sim.isEmpty(), "SimStatus 0 (modem starting): unknown, no alarm");
         System.out.println(pass + " passed, " + fail + " failed");
         if (fail > 0) System.exit(1);
     }

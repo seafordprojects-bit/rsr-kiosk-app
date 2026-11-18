@@ -257,21 +257,25 @@ final class Core {
         } catch (Exception e) {
             Log.w(TAG, "watch calls", e);
         }
-        // owner 2026-11-19: SIM pulled out / swapped -> report at once (the server sends the Telegram)
+        // owner 2026-11-19: SIM pulled out / swapped -> report soon (the server sends the Telegram once it is
+        // still out a minute later - a short ABSENT during a radio reset is not an alarm). One beat per burst.
         try {
-            ctx.registerReceiver(new android.content.BroadcastReceiver() {
+            android.content.BroadcastReceiver simR = new android.content.BroadcastReceiver() {
                 @Override
                 public void onReceive(Context c, Intent i) {
-                    String st = i.getStringExtra("ss");   // ABSENT / READY / LOADED / LOCKED ...
-                    if (st == null || "ABSENT".equals(st) || "READY".equals(st) || "LOADED".equals(st) || "LOCKED".equals(st)) {
-                        bg.postDelayed(Core.this::beat, 3000);
-                    }
+                    bg.removeCallbacks(simBeat);
+                    bg.postDelayed(simBeat, 3000);
                 }
-            }, new IntentFilter("android.intent.action.SIM_STATE_CHANGED"));
+            };
+            IntentFilter sf = new IntentFilter("android.intent.action.SIM_STATE_CHANGED");
+            if (Build.VERSION.SDK_INT >= 33) ctx.registerReceiver(simR, sf, Context.RECEIVER_NOT_EXPORTED);
+            else ctx.registerReceiver(simR, sf);
         } catch (Exception e) {
             Log.w(TAG, "watch sim", e);
         }
     }
+
+    private final Runnable simBeat = this::beat;
 
     private void callWake() {
         if (prefs.phone()) return;

@@ -207,8 +207,14 @@ alter table public.kiosk_app_devices add column if not exists deep_sleep_reason 
 alter table public.kiosk_app_devices add column if not exists sleep_missed_alerted boolean not null default false;
 alter table public.kiosk_app_devices add column if not exists power_last_at     timestamptz;
 alter table public.kiosk_app_devices add column if not exists sim_alert_at      timestamptz;
+alter table public.kiosk_app_devices add column if not exists sim_sub           integer;
+alter table public.kiosk_app_devices add column if not exists sim_absent_since  timestamptz;
+alter table public.kiosk_app_devices add column if not exists sim_alert_state   text;
+alter table public.kiosk_app_devices add column if not exists sim_alert_op      text;
+alter table public.kiosk_app_devices add column if not exists sim_alert_sub     integer;
 alter table public.kiosk_app_modem add column if not exists sim text;
 alter table public.kiosk_app_modem add column if not exists sim_alert_at timestamptz;
+alter table public.kiosk_app_modem add column if not exists sim_told text;
 create table if not exists public.kiosk_app_power_log (
   id         bigserial primary key,
   device_id  text not null,
@@ -304,8 +310,7 @@ declare
   v_prev timestamptz;
   v_full integer;
   v_plan jsonb := '{}'::jsonb;
-  v_osim text;
-  v_oop  text;
+  v_simmsg text;
   v_wear integer;
   v_tok  text;
   v_new  text;
@@ -323,8 +328,7 @@ begin
   if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try|screen woken by phone call|deep sleep \((power cut|holiday)\) until [A-Z][a-z]{2} [0-9]{1,2} [0-9]{1,2}:[0-9]{2} (AM|PM)(, battery [0-9]{1,3}%)?|woke from deep sleep \((power back|wake time|screen turned on|screen touched|phone call|office Screen on|plan cancelled|tablet restarted)\)(, battery [0-9]{1,3}%)?)$' then
     v_ev := '';
   end if;
-  select k.token, k.token_confirmed, k.sim_state, k.sim_operator into v_tok, v_conf, v_osim, v_oop
-    from public.kiosk_app_devices k where k.device_id = v_id;
+  select k.token, k.token_confirmed into v_tok, v_conf from public.kiosk_app_devices k where k.device_id = v_id;
   if v_tok is not null then
     if (p->>'token') = v_tok then
       if not v_conf then update public.kiosk_app_devices k set token_confirmed = true where k.device_id = v_id; end if;
@@ -377,7 +381,12 @@ begin
     mobile_ok       = case when p ? 'mobile_ok' then v_mok else k.mobile_ok end,
     mobile_bad_since = case when not (p ? 'mobile_ok') then k.mobile_bad_since
                             when v_mok is false then coalesce(k.mobile_bad_since, now()) else null end,
-    sim_operator    = coalesce(nullif(left(regexp_replace(coalesce(p->>'sim_operator',''), '[^[:alnum:] ._-]', '', 'g'), 40), ''), k.sim_operator),
+    sim_operator    = case when p->>'sim_state' = 'ready'
+                           then coalesce(nullif(left(regexp_replace(coalesce(p->>'sim_operator',''), '[^[:alnum:] ._-]', '', 'g'), 40), ''), k.sim_operator)
+                           else k.sim_operator end,
+    sim_sub         = case when p->>'sim_state' = 'ready' and p->>'sim_sub' ~ '^[0-9]{1,6}$' then (p->>'sim_sub')::integer else k.sim_sub end,
+    sim_absent_since = case when p->>'sim_state' in ('absent','locked') then coalesce(k.sim_absent_since, now())
+                            when p->>'sim_state' = 'ready' then null else k.sim_absent_since end,
     sim_state       = case when p->>'sim_state' in ('ready','absent','locked','unknown') then p->>'sim_state' else k.sim_state end,
     sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
     battery_unrestricted = case when jsonb_typeof(p->'battery_unrestricted') = 'boolean' then (p->>'battery_unrestricted')::boolean else k.battery_unrestricted end,
@@ -514,23 +523,40 @@ begin
       on conflict (device_id, day) do update set bytes = greatest(x.bytes, excluded.bytes);
     end loop;
   end if;
-  if v_tok is not null and v_new is null and (d.sim_alert_at is null or d.sim_alert_at < now() - interval '2 minutes') then
-    if v_osim = 'ready' and d.sim_state in ('absent','locked') then
-      update public.kiosk_app_devices k set sim_alert_at = now() where k.device_id = v_id;
-      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - SIM REMOVED'
-              || case when d.sim_state = 'locked' then ' or replaced (a locked SIM is in)' else '' end
-              || ' (' || coalesce(d.sim_provider, v_oop, 'SIM') || ', '
-              || to_char(now() at time zone 'Asia/Manila', 'HH12:MI AM') || '). The tablet has no backup internet now. Check the SIM slot sticker.');
-    elsif v_osim in ('absent','locked') and d.sim_state = 'ready' then
-      update public.kiosk_app_devices k set sim_alert_at = now() where k.device_id = v_id;
-      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - SIM is back in ('
-              || coalesce(d.sim_operator, '?') || ')'
-              || case when v_oop is not null and d.sim_operator is not null and upper(v_oop) <> upper(d.sim_operator)
-                      then '. It is a DIFFERENT SIM: was ' || v_oop || ', now ' || d.sim_operator || '.' else '.' end);
-    elsif v_osim = 'ready' and d.sim_state = 'ready' and v_oop is not null and d.sim_operator is not null and upper(v_oop) <> upper(d.sim_operator) then
-      update public.kiosk_app_devices k set sim_alert_at = now() where k.device_id = v_id;
-      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - SIM CHANGED: was '
-              || v_oop || ', now ' || d.sim_operator || '. Was it swapped? Check the SIM slot sticker.');
+  if v_tok is not null and v_new is null and d.sim_state in ('ready','absent','locked') then
+    if d.sim_alert_state is null then
+      update public.kiosk_app_devices k set sim_alert_state = d.sim_state, sim_alert_op = d.sim_operator, sim_alert_sub = d.sim_sub
+       where k.device_id = v_id;
+    elsif d.sim_alert_at is null or d.sim_alert_at < now() - interval '2 minutes' then
+      v_simmsg := case
+        when d.sim_alert_state = 'ready' and d.sim_state in ('absent','locked') and d.sim_absent_since < now() - interval '50 seconds' then
+          ' - SIM REMOVED' || case when d.sim_state = 'locked' then ' or replaced (a locked SIM is in)' else '' end
+          || ' (' || coalesce(d.sim_provider, d.sim_alert_op, 'SIM') || ', since '
+          || to_char(d.sim_absent_since at time zone 'Asia/Manila', 'HH12:MI AM') || '). The tablet has no backup internet now. Check the SIM slot sticker.'
+        when d.sim_alert_state in ('absent','locked') and d.sim_state = 'ready' then
+          ' - SIM is back in (' || coalesce(d.sim_operator, '?') || ')'
+          || case when (d.sim_alert_sub is not null and d.sim_sub is not null and d.sim_alert_sub <> d.sim_sub)
+                    or ((d.sim_alert_sub is null or d.sim_sub is null) and d.sim_alert_op is not null and d.sim_operator is not null
+                        and upper(d.sim_alert_op) <> upper(d.sim_operator))
+                  then '. It is a DIFFERENT SIM' || case when upper(coalesce(d.sim_alert_op,'')) <> upper(coalesce(d.sim_operator,''))
+                                                         then ': was ' || d.sim_alert_op || ', now ' || d.sim_operator else '' end || '.'
+                  else '.' end
+        when d.sim_alert_state = 'ready' and d.sim_state = 'ready'
+             and ((d.sim_alert_sub is not null and d.sim_sub is not null and d.sim_alert_sub <> d.sim_sub)
+               or ((d.sim_alert_sub is null or d.sim_sub is null) and d.sim_alert_op is not null and d.sim_operator is not null
+                   and upper(d.sim_alert_op) <> upper(d.sim_operator))) then
+          ' - SIM CHANGED' || case when upper(coalesce(d.sim_alert_op,'')) <> upper(coalesce(d.sim_operator,''))
+                                   then ': was ' || d.sim_alert_op || ', now ' || d.sim_operator else ' (another SIM of the same network)' end
+          || '. Was it swapped? Check the SIM slot sticker.'
+      end;
+      if v_simmsg is not null then
+        update public.kiosk_app_devices k set sim_alert_at = now(), sim_alert_state = d.sim_state,
+               sim_alert_op = coalesce(d.sim_operator, k.sim_alert_op), sim_alert_sub = coalesce(d.sim_sub, k.sim_alert_sub)
+         where k.device_id = v_id;
+        perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || v_simmsg);
+      elsif d.sim_state = 'ready' and d.sim_alert_state = 'ready' and d.sim_alert_sub is null and d.sim_sub is not null then
+        update public.kiosk_app_devices k set sim_alert_sub = d.sim_sub where k.device_id = v_id;
+      end if;
     end if;
   end if;
   if v_tok is not null and v_new is null then
@@ -1030,14 +1056,14 @@ begin
             || ' in its inbox). To read: on the yard WiFi open http://192.168.1.1 > Tools > SMS.');
   end if;
   if v_msim is not null then
-    if v_msim is distinct from x.sim then
-      update public.kiosk_app_modem y set sim = v_msim where y.device_id = p_device;
-      if x.sim is not null and (x.sim_alert_at is null or x.sim_alert_at < now() - interval '2 minutes') then
-        update public.kiosk_app_modem y set sim_alert_at = now() where y.device_id = p_device;
-        perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || case when v_msim = 'missing'
-                  then ' - the yard WiFi modem says its SIM is MISSING or not working. Was it taken out? Workers'' tablets fall back to their own SIM.'
-                  else ' - the yard WiFi modem SIM is back and working.' end);
-      end if;
+    update public.kiosk_app_modem y set sim = v_msim where y.device_id = p_device;
+    if x.sim_told is null then
+      update public.kiosk_app_modem y set sim_told = v_msim where y.device_id = p_device;
+    elsif v_msim <> x.sim_told and (x.sim_alert_at is null or x.sim_alert_at < now() - interval '2 minutes') then
+      update public.kiosk_app_modem y set sim_alert_at = now(), sim_told = v_msim where y.device_id = p_device;
+      perform public.kiosk_alert_send('RSR Kiosk: ' || v_nm || case when v_msim = 'missing'
+                then ' - the yard WiFi modem says its SIM is MISSING or not working. Was it taken out? Workers'' tablets fall back to their own SIM.'
+                else ' - the yard WiFi modem SIM is back and working.' end);
     end if;
   end if;
   if v_inbox >= 450 and not x.inbox_full_alerted then
@@ -1849,4 +1875,4 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
           and column_name in ('modem_err','batt_health','batt_cycles','batt_design_mah','batt_cap_mah','batt_cap_n',
                               'batt_wear_alerted','batt_bad_alerted','batt_cap_at','batt_bad_at',
                               'sleep_from','sleep_until','deep_sleep_until','deep_sleep_reason','sleep_missed_alerted','power_last_at',
-                              'sim_alert_at')) as build7_columns;
+                              'sim_alert_at','sim_sub','sim_absent_since','sim_alert_state','sim_alert_op','sim_alert_sub')) as build7_columns;

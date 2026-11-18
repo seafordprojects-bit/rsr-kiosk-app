@@ -29,6 +29,17 @@ final class WifiSetter {
         }
     }
 
+    private static boolean validatedWifi(Context ctx) {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            android.net.NetworkCapabilities c = cm == null ? null : cm.getNetworkCapabilities(cm.getActiveNetwork());
+            return c != null && c.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    && c.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     @SuppressWarnings("deprecation")
     private static String currentSsid(WifiManager wm) {
         try {
@@ -56,7 +67,7 @@ final class WifiSetter {
             if (!wm.isWifiEnabled()) wm.setWifiEnabled(true);   // allowed for a device owner
             // already on that Wi-Fi with internet (e.g. it was joined by hand in Settings): nothing to change
             // (owner 2026-11-17: "Android refused the network" for a Wi-Fi the tablet was already using)
-            if (sw && ssid.equals(currentSsid(wm)) && onWifiWithInternet(ctx, wm, -1)) return "done: already connected to " + ssid;
+            if (sw && ssid.equals(currentSsid(wm)) && validatedWifi(ctx)) return "done: already connected to " + ssid;
             WifiConfiguration w = new WifiConfiguration();
             w.SSID = "\"" + ssid + "\"";
             if (pass.isEmpty()) {
@@ -76,20 +87,10 @@ final class WifiSetter {
                 w.networkId = saved.networkId;
                 id = wm.updateNetwork(w);
             }
-            // fallbacks (2026-11-19): Android refuses to update a Wi-Fi saved by hand in Settings, and refuses a network
-            // config that still carries that old id - try as a NEW network, then WPA3 for a WPA3-only router, then
-            // remove the hand-saved copy (device owner may) and add it again
+            // fallback (2026-11-19): Android refuses a config that still carries the id of a Wi-Fi saved by hand in
+            // Settings - try once as a NEW network. Never removes a saved network (its hidden password could not be
+            // brought back: the tablet must never lose a working Wi-Fi).
             if (id < 0) { w.networkId = -1; id = wm.addNetwork(w); }
-            if (id < 0 && !pass.isEmpty() && android.os.Build.VERSION.SDK_INT >= 29) {
-                WifiConfiguration w3 = new WifiConfiguration();
-                w3.SSID = w.SSID;
-                w3.preSharedKey = w.preSharedKey;
-                w3.setSecurityParams(WifiConfiguration.SECURITY_TYPE_SAE);
-                id = wm.addNetwork(w3);
-            }
-            if (id < 0 && saved != null) {
-                try { if (wm.removeNetwork(saved.networkId)) id = wm.addNetwork(w); } catch (Exception ignored) { }
-            }
             if (id < 0) return "failed: Android refused the network" + (saved != null ? " (" + ssid + " was saved by hand: forget it in Settings > Wi-Fi, then try again)" : "");
             if (!sw) {
                 wm.enableNetwork(id, false);

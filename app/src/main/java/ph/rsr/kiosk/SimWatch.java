@@ -63,9 +63,16 @@ final class SimWatch {
                         : st == TelephonyManager.SIM_STATE_ABSENT ? "absent"
                         : (st == TelephonyManager.SIM_STATE_PIN_REQUIRED || st == TelephonyManager.SIM_STATE_PUK_REQUIRED
                            || st == TelephonyManager.SIM_STATE_NETWORK_LOCKED) ? "locked" : "unknown");
-                String op = tm.getSimOperatorName();
-                if (op == null || op.trim().isEmpty()) op = tm.getNetworkOperatorName();
+                // the SIM's own name only when it is ready (the network name changes with the network: no false
+                // "SIM CHANGED"); empty = unknown, the server keeps the last known name (owner 2026-11-19)
+                String op = st == TelephonyManager.SIM_STATE_READY ? tm.getSimOperatorName() : null;
+                if (op == null || op.trim().isEmpty()) op = st == TelephonyManager.SIM_STATE_READY ? tm.getNetworkOperatorName() : "";
                 p.put("sim_operator", op == null ? "" : op.trim());
+                // a new SIM gets a new subscription number from Android; the same SIM keeps its own (swap check)
+                if (st == TelephonyManager.SIM_STATE_READY) try {
+                    int sub = android.telephony.SubscriptionManager.getDefaultDataSubscriptionId();
+                    if (sub >= 0) p.put("sim_sub", sub);
+                } catch (Throwable ignored) { }
                 if (st == TelephonyManager.SIM_STATE_READY && android.os.Build.VERSION.SDK_INT >= 28) {
                     try {
                         SignalStrength ss = tm.getSignalStrength();
