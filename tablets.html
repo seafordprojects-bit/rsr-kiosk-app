@@ -64,6 +64,8 @@
   .ptable th{text-align:left;color:var(--mute);font-weight:600;border-bottom:1px solid var(--line);padding:4px 6px 4px 0}
   .ptable td{border-bottom:1px solid var(--line);padding:5px 6px 5px 0;vertical-align:top}
   .ptable tr.norm td{color:var(--mute)}
+  .ptable tr.day td{font-weight:700;color:var(--ink);background:var(--bg);padding:6px 6px;border-bottom:0}
+  .ptable td.tm{white-space:nowrap;width:1%} .ptable td.bt{text-align:right;white-space:nowrap;width:1%}
   .danger-zone{border:1px solid color-mix(in srgb,var(--bad) 40%,transparent);border-radius:12px;padding:10px;margin-top:10px}
   .danger-zone p{margin:0 0 8px;font-size:13px;color:var(--mute)}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
@@ -155,7 +157,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-19a';
+const PAGE_VERSION = 'v2026-11-19b';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -470,14 +472,32 @@ function powerPart(t) {
   const plan = t.sleep_until && new Date(t.sleep_until) > new Date()
     ? `<div>Holiday sleep planned: <b>${esc(fmt(t.sleep_from))}</b> to <b>${esc(fmt(t.sleep_until))}</b></div>`
     : '<div class="mute">No holiday sleep planned.</div>';
-  const table = rows.length ? `<div class="ptable"><table><thead><tr><th>Power cut</th><th>Back</th><th>Off for</th><th>Battery</th></tr></thead><tbody>${rows.map(r => {
-      const dur = Math.round(((r.on_at ? new Date(r.on_at) : new Date()) - new Date(r.off_at)) / 60000);
-      const normal = genNormal(t.power_windows, r.off_at, r.on_at);
-      const note = r.died_at ? '<br><span class="err">tablet died ' + esc(tm(r.died_at)) + '</span>' : normal ? '<br><span class="mute">generator hours</span>' : '';
-      const sameDay = r.on_at && new Date(r.on_at).toDateString() === new Date(r.off_at).toDateString();
-      return `<tr class="${normal ? 'norm' : ''}"><td>${esc(fmt(r.off_at))}${note}</td><td>${r.on_at ? esc(sameDay ? tm(r.on_at) : fmt(r.on_at)) : r.back_unknown ? '<span class="mute">unknown</span>' : '<b style="color:var(--warn)">still off</b>'}</td>
-        <td>${r.back_unknown ? '-' : esc(mins(dur))}</td><td>${r.batt_off != null ? esc(r.batt_off) + '%' : '?'} &rarr; ${r.batt_on != null ? esc(r.batt_on) + '%' : '-'}</td></tr>`; }).join('')}</tbody></table></div>`
-    : '<div class="mute">No power cut recorded yet (needs app build 23 or newer).</div>';
+  // owner 2026-11-19: one line per change, grouped by day - e.g. 11:30 AM power OFF, 1:00 PM power back (after
+  // 1 h 30 min), 5:00 PM power OFF. Table only: none of this goes to Telegram.
+  const ev = [];
+  for (const r of rows) {
+    const normal = genNormal(t.power_windows, r.off_at, r.on_at);
+    ev.push({ at: r.off_at, kind: 'off', batt: r.batt_off, normal });
+    if (r.died_at) ev.push({ at: r.died_at, kind: 'died' });
+    if (r.booted_at) ev.push({ at: r.booted_at, kind: 'boot' });
+    if (r.on_at) ev.push({ at: r.on_at, kind: 'on', batt: r.batt_on, normal, dur: Math.round((new Date(r.on_at) - new Date(r.off_at)) / 60000) });
+  }
+  ev.sort((a, b) => new Date(b.at) - new Date(a.at));
+  const dayOf = iso => new Date(iso).toLocaleDateString('en-PH', { timeZone: 'Asia/Manila', weekday: 'short', month: 'short', day: 'numeric' });
+  let lastDay = '';
+  const lines = ev.map(e => {
+    const d = dayOf(e.at), head = d !== lastDay ? `<tr class="day"><td colspan="3">${esc(d)}</td></tr>` : '';
+    lastDay = d;
+    const what = e.kind === 'off' ? '<b style="color:' + (e.normal ? 'var(--mute)' : 'var(--bad)') + '">Power OFF</b>' + (e.normal ? ' <span class="mute">(generator hours)</span>' : '')
+               : e.kind === 'on' ? '<b style="color:var(--ok)">Power back</b> <span class="mute">after ' + esc(mins(e.dur)) + '</span>'
+               : e.kind === 'died' ? '<b class="err">Tablet died</b> <span class="mute">(battery empty)</span>'
+               : '<b>Tablet started again</b>';
+    return head + `<tr class="${e.normal ? 'norm' : ''}"><td class="tm">${esc(tm(e.at))}</td><td>${what}</td><td class="bt">${e.batt != null ? esc(e.batt) + '%' : ''}</td></tr>`;
+  }).join('');
+  const open = rows.find(r => !r.on_at && !r.back_unknown);
+  const table = rows.length ? `${open ? '<div class="warnbox">Power is OFF now - since ' + esc(fmt(open.off_at)) + '</div>' : ''}
+    <div class="ptable"><table><thead><tr><th>Time</th><th>What happened</th><th>Battery</th></tr></thead><tbody>${lines}</tbody></table></div>`
+    : '<div class="mute">No power cut recorded yet (needs app build 22 or newer).</div>';
   return `${now}
     <div class="sub2">Holiday sleep</div>
     ${plan}

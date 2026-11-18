@@ -83,7 +83,8 @@ const { chromium } = require('playwright');
     restartBtns: all.cnt.restart === 3,
     batteryPart: txt.includes('BATTERY LIFE') && txt.includes('Still measuring'),
     powerPart: txt.includes('Holiday sleep planned:') && txt.includes('Power log') && txt.includes('3 cuts, 15 h 5 min without power')
-      && txt.includes('generator hours') && txt.includes('tablet died') && txt.includes('still off') && txt.includes('1 h 55 min'),
+      && txt.includes('generator hours') && txt.includes('Tablet died') && txt.includes('Power OFF') && txt.includes('Power back after 1 h 55 min')
+      && txt.includes('Power is OFF now'),
     planBtn: all.html.includes('Plan holiday sleep') && all.html.includes('Cancel plan') };
   Object.assign(checks, early);
   await p.screenshot({ path: require('os').tmpdir() + '/tab1.png', fullPage: true });
