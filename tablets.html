@@ -42,6 +42,21 @@
   .quick{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
   .quick button{font-weight:600}
   .lastcmd{font-size:13px;margin:8px 0 2px}
+  .tile.on,.chip.on{border-color:var(--navy);background:var(--card);box-shadow:inset 0 -3px 0 var(--navy)}
+  .tile em{display:block;font-style:normal;font-size:12px;color:var(--mute)}
+  .chips{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:0 0 10px}
+  .chip{min-height:44px;padding:4px 4px;border-radius:999px;font-size:13px;font-weight:600}
+  .chip.warn{border-color:var(--warn);color:var(--warn)} .chip.bad{border-color:var(--bad);color:var(--bad)}
+  .panel{border:1px solid var(--navy);border-radius:14px;padding:10px 12px 12px;margin:0 0 10px;scroll-margin-top:64px;animation:pin .15s ease-out}
+  @keyframes pin{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .panel>div{margin:3px 0}
+  .phead{display:flex;align-items:center;justify-content:space-between;margin:-2px 0 6px;font-size:17px}
+  .phead .x{min-height:40px;min-width:44px;padding:0;font-size:24px;line-height:1;background:transparent;border:0;color:var(--mute)}
+  .life{background:var(--bg);border-radius:12px;padding:10px;margin:2px 0 8px}
+  .lifeval{font-size:34px;font-weight:800;line-height:1.1}
+  .bar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:6px 0}
+  .bar span{display:block;height:100%;border-radius:99px}
+  @media (prefers-color-scheme:dark){.tile.on,.chip.on{border-color:#8fb8e8;box-shadow:inset 0 -3px 0 #8fb8e8}.panel{border-color:#3b5b85}}
   .acc{border-top:1px solid var(--line);margin:10px -14px 0;padding:0 14px}
   .acc details{border-bottom:1px solid var(--line);margin:0;scroll-margin-top:64px}
   .acc details:last-child{border-bottom:0}
@@ -146,7 +161,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-18a';
+const PAGE_VERSION = 'v2026-11-18b';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -284,10 +299,15 @@ function issues(t) {
   const out = [], add = (lvl, txt, sec) => out.push({ lvl, txt, sec }), phone = isPhone(t);
   if (!t.online && !t.asleep && !phone) add('bad', 'OFFLINE - no report for ' + ago(t.last_seen).replace(' ago', ''), 'details');
   if (t.page_ok === false) add('bad', 'Kiosk page not loading', 'fix');
-  if (t.battery != null && t.battery <= 20 && !t.charging) add('bad', 'Battery low: ' + t.battery + '% and not charging', 'details');
-  else if (t.charging === false && !phone && !t.power_windows) add('warn', 'Not charging', 'details');
-  if (t.battery_temp >= 45) add('bad', 'Battery hot: ' + t.battery_temp + ' °C', 'details');
-  else if (t.battery_temp >= 40) add('warn', 'Battery warm: ' + t.battery_temp + ' °C', 'details');
+  if (t.battery != null && t.battery <= 20 && !t.charging) add('bad', 'Battery low: ' + t.battery + '% and not charging', 'battery');
+  else if (t.charging === false && !phone && !t.power_windows) add('warn', 'Not charging', 'battery');
+  if (t.battery_temp >= 45) add('bad', 'Battery hot: ' + t.battery_temp + ' °C', 'battery');
+  else if (t.battery_temp >= 40) add('warn', 'Battery warm: ' + t.battery_temp + ' °C', 'battery');
+  // battery wear (owner 2026-11-18): replace before it fails
+  if (['dead', 'failure', 'over_voltage'].includes(t.batt_health)) add('bad', 'Android says the battery is ' + t.batt_health.replace('_', ' ').toUpperCase() + ' - replace it', 'battery');
+  if (t.batt_wear_pct != null && t.batt_wear_pct < 65) add('bad', 'Battery worn out (holds ' + t.batt_wear_pct + '% of new) - replace it', 'battery');
+  else if (t.batt_wear_pct != null && t.batt_wear_pct < 80) add('warn', 'Battery wearing (holds ' + t.batt_wear_pct + '% of new) - plan a replacement', 'battery');
+  else if (t.drain_on >= 20) add('warn', 'Battery runs down fast (full charge about ' + Math.round(100 / t.drain_on) + ' h with the screen on)', 'battery');
   const p = t.punches;
   if (p && +p.stuck) add('bad', p.stuck + ' stuck punch' + (+p.stuck > 1 ? 'es' : '') + ' (will not sync by themselves)', 'punches');
   else if (p && (+p.queue || 0) + (+p.offline_queue || 0)) add('warn', ((+p.queue || 0) + (+p.offline_queue || 0)) + ' punches waiting to sync', 'punches');
@@ -312,17 +332,16 @@ function issues(t) {
   return out;
 }
 const lvlOf = (iss, sec) => iss.some(x => x.sec === sec && x.lvl === 'bad') ? 'bad' : iss.some(x => x.sec === sec) ? 'warn' : '';
-// one folded part; opens by itself when it has a problem, unless the owner closed it
-function part(t, sec, title, sum, sumCls, body) {
-  const k = t.device_id + '|' + sec, open = k in openDet ? openDet[k] : !!(sumCls === 'bad' || sumCls === 'warn');
-  return `<details data-k="${esc(k)}" id="${esc(k)}"${open ? ' open' : ''}><summary><span class="t">${title}</span><span class="s ${sumCls || ''}">${sum}</span></summary><div class="body">${body}</div></details>`;
+// Tiles work like tabs (owner 2026-11-18): tap a tile -> its details show RIGHT BELOW the tiles; tap again -> closed.
+// Before the owner taps anything, the first part with a problem is shown. His choice is kept across refreshes.
+const sel = {};   // device_id -> open part (null = closed by the owner)
+function openPart(dev, sec) {
+  sel[dev] = (sel[dev] === sec || (sel[dev] === undefined && firstProblem[dev] === sec)) ? null : sec;
+  render(lastRows);
+  const pnl = document.getElementById('pnl-' + dev);
+  if (pnl) pnl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
-function openPart(k) {
-  const d = document.getElementById(k);
-  if (!d) return;
-  d.open = true; openDet[k] = true;
-  d.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
+const firstProblem = {};
 
 function render(rows) {
   lastRows = rows;
@@ -340,7 +359,7 @@ function render(rows) {
 }
 
 function cardHtml(t, iss) {
-  const phone = isPhone(t), id = esc(t.device_id), K = sec => esc(t.device_id + '|' + sec);
+  const phone = isPhone(t), id = esc(t.device_id), dev = t.device_id;
   const worst = iss.some(x => x.lvl === 'bad') ? 'bad' : iss.length ? 'warn' : 'ok';
   const color = t.online ? 'var(--ok)' : (t.asleep || phone) ? 'var(--mute)' : 'var(--bad)';
   const state = t.online ? 'Online' : phone ? 'Not on Wi-Fi (normal in the yard)' : t.asleep ? 'Asleep (screen schedule)' : 'OFFLINE';
@@ -348,14 +367,49 @@ function cardHtml(t, iss) {
              : `<span class="pill ${worst}">${iss.length} to check</span>`;
   const attn = iss.length ? `<ul class="attn ${worst}">${iss.map(x => `<li class="${x.lvl === 'warn' ? 'w' : ''}">${esc(x.txt)}</li>`).join('')}</ul>` : '';
 
-  // status tiles (tap = open that part)
-  const n = t.net || {}, p = t.punches, s = t.sim || {}, m = t.modem;
+  // the parts (each one opens under the tiles)
+  const n = t.net || {}, p = t.punches, s = t.sim || {}, m = t.modem, P = {};
+  P.battery = { title: 'Battery', body: batteryPart(t, phone) };
+  if (!phone) {
+    P.punches = { title: 'Punches', body: punchesPart(t).body };
+    P.net = { title: 'Connection', body: netPart(t).body };
+    P.sim = { title: 'SIM - ' + esc(s.provider || s.operator || 'load'), body: simPart(t).body };
+    P.modem = { title: 'Yard WiFi load', body: modemPart(t).body };
+  }
+  P.details = { title: 'Tablet details', body: detailsPart(t, phone).body };
+  P.settings = { title: 'Settings', body: `
+      <dl class="kv"><dt>Screen schedule</dt><dd>${t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on'}</dd>
+        <dt>Power</dt><dd>${t.power_windows ? 'Generator ' + esc(t.power_windows).replace(/,/g, ', ') : 'Grid (always on)'}</dd></dl>
+      <div class="btns">
+        ${cmdBtn(t, 'schedule', 'Screen schedule', '', '', 'data-on="' + esc(t.sched_on || '05:30') + '" data-off="' + esc(t.sched_off || '22:30') + '"')}
+        <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
+        ${cmdBtn(t, 'set_wifi', 'Set Wi-Fi')}
+        ${cmdBtn(t, 'open_settings', 'Open settings', 'Open the settings screen on the tablet (no passcode needed for 10 minutes)?')}
+      </div>` };
+  P.fix = { title: 'Fix &amp; restart', body: `
+      <div class="btns">
+        ${cmdBtn(t, 'hard_reload', 'Full reload', 'Full reload clears the old cached kiosk version (punches are kept). Continue?')}
+        ${cmdBtn(t, 'update', 'Update app')}
+        ${cmdBtn(t, 'screen_off', 'Screen off', 'Turn the screen off now?')}
+      </div>
+      <div class="danger-zone"><p>Workers cannot punch while the tablet restarts (about 1 minute). Forget only after a factory reset or reinstall.</p>
+        <div class="btns">
+          ${cmdBtn(t, 'restart', 'Restart tablet', 'Restart the tablet now? Workers cannot punch for about 1 minute.', 'danger')}
+          <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
+        </div></div>` };
+  const ev = (t.events || []);
+  P.events = { title: 'Recent activity', body: ev.length ? '<ul class="ev">' + ev.map(e => '<li>' + esc(e.event) + ' - ' + hhmm(e.at) + '</li>').join('') + '</ul>' : '<div class="mute">Nothing recorded yet.</div>' };
+
+  const fp = iss.map(x => x.sec).find(x => P[x]);
+  firstProblem[dev] = fp;
+  const open = dev in sel ? sel[dev] : (fp || null);
+
+  // tiles (status + tab) and the smaller buttons for the other parts
   const batt = t.battery == null ? '-' : t.battery + '%' + (t.charging ? ' ⚡' : '');
-  const tile = (sec, label, val, cls) => `<button class="tile ${cls || ''}" onclick="openPart('${K(sec)}')"><small>${label}</small><span>${val}</span></button>`;
-  const tiles = [
-    tile('details', 'Battery', esc(batt), t.battery != null && t.battery <= 20 && !t.charging ? 'bad' : t.charging === false && !phone && !t.power_windows ? 'warn' : ''),
-    tile('details', 'Screen', t.screen_on ? 'On' : 'Off', ''),
-  ];
+  const tile = (sec, label, val, cls) => `<button class="tile ${cls || ''}${open === sec ? ' on' : ''}" aria-expanded="${open === sec}" onclick="openPart('${id}','${sec}')"><small>${label}</small><span>${val}</span></button>`;
+  const life = t.batt_wear_pct != null ? '<em>battery life ' + esc(t.batt_wear_pct) + '%</em>' : '';
+  const tiles = [tile('battery', 'Battery', esc(batt) + life, lvlOf(iss, 'battery')),
+                 tile('settings', 'Screen', t.screen_on ? 'On' : 'Off', '')];
   if (!phone) {
     const q = p ? (+p.queue || 0) + (+p.offline_queue || 0) : 0;
     tiles.push(tile('punches', 'Punches', !p ? '-' : +p.stuck ? p.stuck + ' stuck' : q ? q + ' waiting' : 'All synced ✓', lvlOf(iss, 'punches')));
@@ -366,6 +420,11 @@ function cardHtml(t, iss) {
   } else {
     tiles.push(tile('details', 'App build', esc(t.app_version || '-'), ''));
   }
+  const chip = (sec, label) => `<button class="chip${open === sec ? ' on' : ''} ${lvlOf(iss, sec)}" aria-expanded="${open === sec}" onclick="openPart('${id}','${sec}')">${label}</button>`;
+  const chips = `<div class="chips">${chip('details', 'Details')}${chip('settings', 'Settings')}${chip('fix', 'Fix')}${chip('events', 'Activity' + (ev.length ? ' (' + ev.length + ')' : ''))}</div>`;
+  const panel = open && P[open] ? `<div class="panel" id="pnl-${id}">
+      <div class="phead"><b>${P[open].title}</b><button class="x" aria-label="Close" onclick="openPart('${id}','${open}')">&times;</button></div>
+      ${P[open].body}</div>` : '';
 
   const lastCmd = t.cmd ? `Last command: <b>${esc(NAMES[t.cmd] || t.cmd)}</b> - ${t.pending ? 'waiting for tablet...' : esc(t.cmd_result || '-')} <span class="mute">(${hhmm(t.cmd_at)})</span>` : '';
   const quick = `<div class="quick">
@@ -375,61 +434,48 @@ function cardHtml(t, iss) {
       ${cmdBtn(t, 'reload', 'Reload page')}
     </div>${lastCmd ? '<div class="lastcmd mute">' + lastCmd + '</div>' : ''}`;
 
-  // folded parts
-  const parts = [];
-  if (!phone) {
-    const P = punchesPart(t), N = netPart(t), SIM = simPart(t), M = modemPart(t);
-    parts.push(part(t, 'punches', 'Punches', P.sum, lvlOf(iss, 'punches') || P.cls, P.body));
-    parts.push(part(t, 'net', 'Connection', N.sum, lvlOf(iss, 'net') || N.cls, N.body));
-    parts.push(part(t, 'sim', 'SIM - ' + esc(s.provider || s.operator || 'load'), SIM.sum, lvlOf(iss, 'sim') || SIM.cls, SIM.body));
-    parts.push(part(t, 'modem', 'Yard WiFi load', M.sum, lvlOf(iss, 'modem') || M.cls, M.body));
-  }
-  const D = detailsPart(t, phone);
-  parts.push(part(t, 'details', 'Tablet details', D.sum, lvlOf(iss, 'details'), D.body));
-  const sched = t.sched_on ? esc(t.sched_on) + '-' + esc(t.sched_off) : 'always on';
-  parts.push(part(t, 'settings', 'Settings', 'Screen ' + sched + (t.power_windows ? ' - generator' : ''), '', `
-      <dl class="kv"><dt>Screen schedule</dt><dd>${t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on'}</dd>
-        <dt>Power</dt><dd>${t.power_windows ? 'Generator ' + esc(t.power_windows).replace(/,/g, ', ') : 'Grid (always on)'}</dd></dl>
-      <div class="btns">
-        ${cmdBtn(t, 'schedule', 'Screen schedule', '', '', 'data-on="' + esc(t.sched_on || '05:30') + '" data-off="' + esc(t.sched_off || '22:30') + '"')}
-        <button onclick="askPower('${id}','${esc(t.power_windows || '')}')">Generator hours</button>
-        ${cmdBtn(t, 'set_wifi', 'Set Wi-Fi')}
-        ${cmdBtn(t, 'open_settings', 'Open settings', 'Open the settings screen on the tablet (no passcode needed for 10 minutes)?')}
-      </div>`));
-  parts.push(part(t, 'fix', 'Fix &amp; restart', 'when something is stuck', lvlOf(iss, 'fix'), `
-      <div class="btns">
-        ${cmdBtn(t, 'hard_reload', 'Full reload', 'Full reload clears the old cached kiosk version (punches are kept). Continue?')}
-        ${cmdBtn(t, 'update', 'Update app')}
-        ${cmdBtn(t, 'screen_off', 'Screen off', 'Turn the screen off now?')}
-      </div>
-      <div class="danger-zone"><p>Workers cannot punch while the tablet restarts (about 1 minute). Forget only after a factory reset or reinstall.</p>
-        <div class="btns">
-          ${cmdBtn(t, 'restart', 'Restart tablet', 'Restart the tablet now? Workers cannot punch for about 1 minute.', 'danger')}
-          <button class="danger" onclick="forgetTablet('${id}','${esc(t.name || t.device_id)}')">Forget tablet</button>
-        </div></div>`));
-  const ev = (t.events || []);
-  if (ev.length) parts.push(part(t, 'events', 'Recent activity', esc(String(ev[0].event).slice(0, 40)), '',
-      '<ul class="ev">' + ev.map(e => '<li>' + esc(e.event) + ' - ' + hhmm(e.at) + '</li>').join('') + '</ul>'));
-
   return `<div class="card">
     <div class="chead"><span class="dot" style="background:${color}"></span>
       <div class="nm"><span class="name">${esc(t.name || t.device_id)}${phone ? ' <span class="mute">&#128241;</span>' : ''}</span>
         <span class="mute">${state} - ${ago(t.last_seen)}</span></div>${pill}</div>
     ${attn}
     <div class="tiles">${tiles.join('')}</div>
+    ${chips}
+    ${panel}
     ${quick}
-    <div class="acc">${parts.join('')}</div>
   </div>`;
 }
 
+// owner 2026-11-18: battery life % (wear) and when to replace it
+function batteryPart(t, phone) {
+  const life = t.batt_wear_pct, col = life == null ? 'inherit' : life < 65 ? 'var(--bad)' : life < 80 ? 'var(--warn)' : 'var(--ok)';
+  const verdict = life == null ? '' : life < 65 ? 'Worn out - REPLACE the battery (Samsung service center).'
+                : life < 80 ? 'Wearing - plan a battery replacement.' : 'Healthy.';
+  const hOn = t.drain_on > 0 ? Math.round(100 / t.drain_on) : null, hOff = t.drain_off > 0 ? Math.round(100 / t.drain_off) : null;
+  const hl = { good: 'Good', overheat: 'OVERHEATING', dead: 'DEAD', over_voltage: 'OVER VOLTAGE', failure: 'FAILURE', cold: 'Too cold' }[t.batt_health];
+  const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+  return `
+    <div class="life">
+      <div><small class="mute">BATTERY LIFE (compared with a new battery)</small></div>
+      ${life != null ? `<div class="lifeval" style="color:${col}">${esc(life)}%</div>
+        <div class="bar"><span style="width:${Math.max(3, Math.min(100, +life))}%;background:${col}"></span></div>
+        <div>${verdict} <span class="mute">A full charge holds about ${esc(t.batt_cap_mah)} of ${esc(t.batt_design_mah)} mAh.</span></div>`
+      : `<div class="mute">Still measuring - the tablet needs about 30 minutes between 30% and 95% charge${t.batt_cap_n ? ' (' + esc(Math.min(t.batt_cap_n, 30)) + ' of 30 readings)' : ''}${t.batt_design_mah ? '' : '; this tablet does not tell its size when new'}. Needs app build 22 or newer.</div>`}
+    </div>
+    <dl class="kv">
+      ${row('Charge now', t.battery == null ? '-' : esc(t.battery) + '%' + (t.charging ? ' (charging)' : ' (NOT charging)'))}
+      ${row('Full charge lasts', hOn ? 'about <b>' + hOn + ' h</b> screen on' + (hOff ? ', ' + hOff + ' h screen off' : '') : 'learning...')}
+      ${row('Battery use', t.drain_on == null ? 'learning...' : esc(t.drain_on) + '%/h screen on' + (t.drain_off == null ? '' : ', ' + esc(t.drain_off) + '%/h off'))}
+      ${row('Temperature', t.battery_temp == null ? '-' : '<span style="color:' + (t.battery_temp >= 45 ? 'var(--bad)' : t.battery_temp >= 40 ? 'var(--warn)' : 'inherit') + '">' + esc(t.battery_temp) + ' &deg;C</span>')}
+      ${row('Android says', hl ? '<span style="color:' + (t.batt_health === 'good' ? 'inherit' : 'var(--bad)') + '">' + hl + '</span>' : '-')}
+      ${row('Charge cycles', t.batt_cycles != null ? esc(t.batt_cycles) : '<span class="mute">not reported</span>')}
+    </dl>
+    <div class="mute" style="margin-top:6px">Telegram warns you once when the battery life drops under 80% (plan a replacement) and under 65% (replace).</div>`;
+}
+
 function detailsPart(t, phone) {
-  const batt = t.battery == null ? '-' : t.battery + '%' + (t.charging ? ' (charging)' : ' (NOT charging)');
-  const battColor = (t.battery != null && t.battery <= 20 && !t.charging) || t.charging === false ? 'var(--warn)' : 'inherit';
   const row = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
   return { sum: 'build ' + esc(t.app_version || '-') + (t.page_version ? ' - ' + esc(t.page_version) : ''), body: `<dl class="kv">
-    ${row('Battery', `<span style="color:${battColor}">${batt}</span>`)}
-    ${row('Battery temp', t.battery_temp == null ? '-' : '<span style="color:' + (t.battery_temp >= 45 ? 'var(--bad)' : t.battery_temp >= 40 ? 'var(--warn)' : 'inherit') + '">' + esc(t.battery_temp) + ' &deg;C</span>')}
-    ${row('Battery use', t.drain_on == null ? 'learning...' : esc(t.drain_on) + '%/h screen on' + (t.drain_off == null ? '' : ', ' + esc(t.drain_off) + '%/h off'))}
     ${row('Screen', t.screen_on ? 'On' : 'Off')}
     ${row('Kiosk page', t.page_ok === false ? '<span style="color:var(--bad)">Not loading</span>' : 'OK')}
     ${row('Lock', (t.device_owner ? 'Full lock' : '<span style="color:var(--warn)">Pinning only</span>') + (t.maintenance ? ' <span style="color:var(--warn)">(maintenance)</span>' : ''))}

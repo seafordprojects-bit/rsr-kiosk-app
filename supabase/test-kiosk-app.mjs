@@ -813,6 +813,43 @@ await q(`delete from kiosk_app_devices where device_id in ($1,$2)`,[B8,B9]); awa
 await q(`delete from sent`);
 }
 
+// ---- battery wear (owner 2026-11-18). Worked example: new Tab A9 battery = 5100 mAh.
+//  readings of 3,800 mAh: the average moves slowly from the first reading; after 30 readings 3,800 / 5,100 = 75% -> "wearing" (under 80%)
+//  readings of 3,000 mAh pull it under 65% -> "WORN OUT, replace" (once); new battery 5,050 mAh -> back over 90% -> reset
+{
+const BW='app-bwtab', MAN='https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen';
+const bb=(x)=>beat(Object.assign({device_id:BW,battery:60,charging:true,page_url:MAN,batt_design_mah:5100,batt_health:'good',batt_cycles:212},x||{}));
+await bb({name:'Batt Kiosk'}); await bb();
+const D=async()=>(await q(`select * from kiosk_app_devices where device_id=$1`,[BW]))[0];
+const sentN=async(s)=>(await q(`select msg from sent where msg like $1`,['%'+s+'%'])).length;
+await q(`delete from sent`);
+let d=await D(); ok(d.batt_design_mah===5100 && d.batt_health==='good' && d.batt_cycles===212,'battery: design 5100 mAh, health good, 212 cycles saved');
+await bb({batt_full_mah:'abc'}); await bb({batt_full_mah:900}); await bb({batt_full_mah:9000});
+d=await D(); ok(d.batt_cap_n===0,'battery: odd readings (text, under 30% or over 130% of new) ignored');
+for (let i=0;i<29;i++) await bb({batt_full_mah:3800});
+d=await D(); ok(d.batt_cap_n===29 && Number(d.batt_cap_mah)===3800 && await sentN('battery')===0,'29 readings: not judged yet');
+let L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===BW);
+ok(L.batt_wear_pct===null && L.batt_cap_mah===null,'Tablets page: no battery-life figure before 30 readings');
+await bb({batt_full_mah:3800});
+ok(await sentN('Batt Kiosk - battery is wearing: a full charge holds about 75% of a new battery (3800 of 5100 mAh). Plan a battery replacement.')===1,'30th reading: 75% -> "battery is wearing" Telegram');
+L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===BW);
+ok(L.batt_wear_pct===75 && L.batt_cap_mah===3800 && L.batt_cycles===212,'Tablets page: battery life 75%, 3800 mAh, 212 cycles');
+await bb({batt_full_mah:3800});
+ok(await sentN('battery is wearing')===1,'wearing alert sent once');
+for (let i=0;i<20;i++) await bb({batt_full_mah:3000});   // 3800*0.95^20 + 3000*(1-0.95^20) = about 3287 = 64%
+d=await D(); ok(Math.round(Number(d.batt_cap_mah)/51)<65 && await sentN('BATTERY WORN OUT')===1,'under 65% -> "WORN OUT, replace" once ('+Math.round(Number(d.batt_cap_mah))+' mAh)');
+await bb({batt_full_mah:3000});
+ok(await sentN('BATTERY WORN OUT')===1,'worn-out alert not repeated');
+await q(`update kiosk_app_devices set batt_cap_mah=5050 where device_id=$1`,[BW]); await bb({batt_full_mah:5050});
+ok((await D()).batt_wear_alerted===null,'new battery (over 90%): alerts reset');
+await bb({batt_health:'dead'});
+ok(await sentN('Batt Kiosk - Android reports the battery as DEAD')===1,'Android says DEAD: Telegram');
+await bb({batt_health:'dead'}); ok(await sentN('reports the battery as')===1,'dead alert once');
+await bb({batt_health:'good'}); ok((await D()).batt_bad_alerted===false,'health good again: reset');
+await bb({batt_health:'<script>'}); ok((await D()).batt_health==='good','unknown health text ignored');
+await q(`delete from kiosk_app_devices where device_id=$1`,[BW]); await q(`delete from sent`);
+}
+
 // anon cannot read tables
 // the owner's go-live check (supabase/paste/build7-public-check.sql): every table "public can read = false"
 { const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===10 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 10 tables'); }

@@ -192,6 +192,13 @@ revoke all on public.kiosk_app_modem_reads from public, anon, authenticated;
 alter table public.kiosk_app_modem_reads enable row level security;
 revoke all on sequence public.kiosk_app_modem_reads_id_seq from public, anon, authenticated;
 alter table public.kiosk_app_devices add column if not exists modem_err text;
+alter table public.kiosk_app_devices add column if not exists batt_health       text;
+alter table public.kiosk_app_devices add column if not exists batt_cycles       integer;
+alter table public.kiosk_app_devices add column if not exists batt_design_mah   integer;
+alter table public.kiosk_app_devices add column if not exists batt_cap_mah      numeric(7,1);
+alter table public.kiosk_app_devices add column if not exists batt_cap_n        integer not null default 0;
+alter table public.kiosk_app_devices add column if not exists batt_wear_alerted integer;
+alter table public.kiosk_app_devices add column if not exists batt_bad_alerted  boolean not null default false;
 create sequence if not exists public.kiosk_app_cmd_seq;
 revoke all on sequence public.kiosk_app_cmd_seq from anon, authenticated;
 create or replace function public.kiosk_app_ts(p text)
@@ -269,6 +276,8 @@ declare
   v_out  jsonb := case when jsonb_typeof(p->'outage') = 'object' then p->'outage' end;
   v_otxt text;
   v_prev timestamptz;
+  v_full integer;
+  v_wear integer;
   v_tok  text;
   v_new  text;
   v_name text := regexp_replace(left(btrim(coalesce(p->>'name','')), 40), '[^[:alnum:] ._-]', '', 'g');
@@ -343,6 +352,10 @@ begin
     sms_ok          = case when jsonb_typeof(p->'sms_ok') = 'boolean' then (p->>'sms_ok')::boolean else k.sms_ok end,
     battery_unrestricted = case when jsonb_typeof(p->'battery_unrestricted') = 'boolean' then (p->>'battery_unrestricted')::boolean else k.battery_unrestricted end,
     modem_err       = nullif(left(regexp_replace(coalesce(p->>'modem_err', ''), '[^[:alnum:] ./()-]', '', 'g'), 60), ''),
+    batt_health     = case when p->>'batt_health' in ('good','overheat','dead','over_voltage','failure','cold') then p->>'batt_health' else k.batt_health end,
+    batt_cycles     = case when p->>'batt_cycles' ~ '^[0-9]{1,5}$' then (p->>'batt_cycles')::integer else k.batt_cycles end,
+    batt_design_mah = case when p->>'batt_design_mah' ~ '^[0-9]{3,5}$' and (p->>'batt_design_mah')::integer between 500 and 30000
+                           then (p->>'batt_design_mah')::integer else k.batt_design_mah end,
     last_seen       = now(),
     unplugged_since = case when v_chg is false then coalesce(k.unplugged_since, now()) else null end
   where k.device_id = v_id
@@ -361,6 +374,39 @@ begin
     else
       insert into public.kiosk_app_events (device_id, event) values (v_id, v_ev);
     end if;
+  end if;
+  if coalesce(p->>'batt_full_mah', '') ~ '^[0-9]{3,5}$' then
+    v_full := (p->>'batt_full_mah')::integer;
+    if v_full between 500 and 30000 and (d.batt_design_mah is null or v_full between d.batt_design_mah * 0.3 and d.batt_design_mah * 1.3) then
+      update public.kiosk_app_devices k set
+        batt_cap_mah = case when k.batt_cap_mah is null or k.batt_cap_n = 0 then v_full else round(k.batt_cap_mah * 0.95 + v_full * 0.05, 1) end,
+        batt_cap_n = least(k.batt_cap_n + 1, 1000000)
+       where k.device_id = v_id
+       returning k.batt_cap_mah, k.batt_cap_n into d.batt_cap_mah, d.batt_cap_n;
+    end if;
+  end if;
+  if d.batt_cap_n >= 30 and d.batt_design_mah > 0 then
+    v_wear := round(d.batt_cap_mah / d.batt_design_mah * 100);
+    if v_wear < 65 and coalesce(d.batt_wear_alerted, 100) > 65 then
+      update public.kiosk_app_devices k set batt_wear_alerted = 65 where k.device_id = v_id;
+      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - BATTERY WORN OUT: a full charge holds only about '
+              || v_wear || '% of a new battery (' || round(d.batt_cap_mah) || ' of ' || d.batt_design_mah
+              || ' mAh). It runs down fast - REPLACE the battery soon (Samsung service center).');
+    elsif v_wear < 80 and v_wear >= 65 and coalesce(d.batt_wear_alerted, 100) > 80 then
+      update public.kiosk_app_devices k set batt_wear_alerted = 80 where k.device_id = v_id;
+      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - battery is wearing: a full charge holds about '
+              || v_wear || '% of a new battery (' || round(d.batt_cap_mah) || ' of ' || d.batt_design_mah
+              || ' mAh). Plan a battery replacement.');
+    elsif v_wear >= 90 and d.batt_wear_alerted is not null then
+      update public.kiosk_app_devices k set batt_wear_alerted = null where k.device_id = v_id;
+    end if;
+  end if;
+  if d.batt_health in ('dead','over_voltage','failure') and not d.batt_bad_alerted then
+    update public.kiosk_app_devices k set batt_bad_alerted = true where k.device_id = v_id;
+    perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - Android reports the battery as '
+            || upper(replace(d.batt_health, '_', ' ')) || '. Replace the battery (Samsung service center).');
+  elsif d.batt_health = 'good' and d.batt_bad_alerted then
+    update public.kiosk_app_devices k set batt_bad_alerted = false where k.device_id = v_id;
   end if;
   if d.charging is false and d.battery is not null then
     if d.drain_anchor_at is null then
@@ -527,6 +573,10 @@ begin
            'battery_temp', k.battery_temp, 'last_outage', k.last_outage, 'power_windows', k.power_windows,
            'page_version', k.page_version, 'page_error', k.page_error, 'page_error_at', k.page_error_at, 'shot_at', k.shot_at,
            'drain_on', case when k.drain_on_n >= 3 then k.drain_on end, 'drain_off', case when k.drain_off_n >= 3 then k.drain_off end,
+           'batt_health', k.batt_health, 'batt_cycles', k.batt_cycles, 'batt_design_mah', k.batt_design_mah,
+           'batt_cap_mah', case when k.batt_cap_n >= 30 then round(k.batt_cap_mah) end,
+           'batt_cap_n', k.batt_cap_n,
+           'batt_wear_pct', case when k.batt_cap_n >= 30 and k.batt_design_mah > 0 then least(100, round(k.batt_cap_mah / k.batt_design_mah * 100)) end,
            'asleep', not public.kiosk_app_awake_now(k.sched_on, k.sched_off),
            'phone', k.phone_mode or public.kiosk_app_is_phone(k.page_url),
            'cmd', k.cmd, 'cmd_at', k.cmd_at, 'cmd_result', k.cmd_result, 'cmd_done_at', k.cmd_done_at,
@@ -1592,4 +1642,5 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
           and proname in ('kiosk_app_modem_cum_at','kiosk_app_gb','kiosk_app_modem_parts','kiosk_app_modem_put',
                           'kiosk_app_modem_info','kiosk_app_modem_set','kiosk_app_modem_msg','kiosk_app_tick')) as build7_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
-          and column_name = 'modem_err') as build7_columns;
+          and column_name in ('modem_err','batt_health','batt_cycles','batt_design_mah','batt_cap_mah','batt_cap_n',
+                              'batt_wear_alerted','batt_bad_alerted')) as build7_columns;

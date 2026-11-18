@@ -35,39 +35,59 @@ const { chromium } = require('playwright');
   early.overview = pre.includes('3tablets') && pre.includes('2online') && pre.includes('2need attention');
   early.attention = pre.includes('1 stuck punch (will not sync by themselves)') && pre.includes('On MOBILE DATA (Wi-Fi down)') && pre.includes('Yard WiFi load under 10 GB');
   early.phoneAllGood = await p.isVisible('#list > :nth-child(2 of .card) .pill.ok');
-  early.problemOpen = await p.isVisible('#list > :nth-child(1 of .card) button[data-cmd="retry_punches"]');
-  early.quietClosed = !(await p.isVisible('#list > :nth-child(1 of .card) button[data-cmd="restart"]'));
-  early.restartInDanger = (await p.$$('.danger-zone button[data-cmd="restart"]')).length === 3;
-  await p.click('#list > :nth-child(1 of .card) .tile:has-text("SIM GOMO")'); await p.waitForTimeout(500);
-  early.tileOpensPart = await p.isVisible('#list > :nth-child(1 of .card) button:has-text("I just loaded")');
-  // redesign 2026-11-18: parts are folded; open every part (as the owner would tap them) before reading the texts
-  await p.evaluate(() => { for (const d of document.querySelectorAll('#list details')) d.open = true; });
-  const txt = await p.textContent('#list');
+  // tiles work like tabs (owner 2026-11-18): the first problem part shows right under the tiles; tap = open / close
+  const C1 = '#list > :nth-child(1 of .card)';
+  early.problemOpen = await p.isVisible(C1 + ' .panel button[data-cmd="retry_punches"]');
+  early.onePanel = (await p.$$(C1 + ' .panel')).length === 1;
+  early.quietClosed = !(await p.isVisible(C1 + ' button[data-cmd="restart"]'));
+  await p.click(C1 + ' .tile:has-text("SIM GOMO")'); await p.waitForTimeout(300);
+  early.tileOpensPart = await p.isVisible(C1 + ' .panel button:has-text("I just loaded")') && !(await p.isVisible(C1 + ' button[data-cmd="retry_punches"]'));
+  early.panelUnderTiles = await p.evaluate(c => { const card = document.querySelector(c), tl = card.querySelector('.tiles'), pn = card.querySelector('.panel'), q = card.querySelector('.quick');
+    return !!(tl && pn && q) && (tl.compareDocumentPosition(pn) & 4) && (pn.compareDocumentPosition(q) & 4); }, C1);
+  await p.click(C1 + ' .tile:has-text("SIM GOMO")'); await p.waitForTimeout(200);
+  early.tapAgainCloses = (await p.$$(C1 + ' .panel')).length === 0;
+  await p.evaluate(() => load()); await p.waitForTimeout(300);
+  early.closedStaysClosed = (await p.$$(C1 + ' .panel')).length === 0;
+  await p.click(C1 + ' .chip:has-text("Fix")'); await p.waitForTimeout(200);
+  early.restartInDanger = await p.isVisible(C1 + ' .panel .danger-zone button[data-cmd="restart"]');
+  await p.click(C1 + ' .panel .x'); await p.waitForTimeout(200);
+  early.xCloses = (await p.$$(C1 + ' .panel')).length === 0;
+  // read every part's text: open each part on every card in turn (as the owner would tap them)
+  const all = await p.evaluate(() => { let html = '', text = ''; const cnt = {};
+    for (const t of lastRows) for (const sec of ['battery','punches','net','sim','modem','details','settings','fix','events']) {
+      sel[t.device_id] = sec; render(lastRows);
+      const pn = document.getElementById('pnl-' + t.device_id); if (!pn) continue;
+      html += pn.innerHTML; text += pn.textContent;
+      for (const bt of pn.querySelectorAll('button[data-cmd]')) cnt[bt.dataset.cmd] = (cnt[bt.dataset.cmd] || 0) + 1;
+    }
+    for (const t of lastRows) delete sel[t.device_id]; render(lastRows);
+    return { html, text, cnt }; });
+  const txt = all.text;
   const checks = {
     stuck: txt.includes('1 stuck (refused by the server)'), waiting: txt.includes('3 waiting to sync'),
     mobile: txt.includes('MOBILE DATA'), down: txt.includes('today 52 min') && txt.includes('3 h 10 min'),
     battery: txt.includes('not "Unrestricted"'), sim: txt.includes('SIM - GOMO') && txt.includes('6.1 GB of 25 GB (24%)') && txt.includes('15 days left'),
     closes: txt.includes('Number closes if no load by'), smsNo: txt.includes('NOT allowed on this tablet'),
-    noScriptInjected: (await p.$$('#list script')).length === 0 && !(await p.innerHTML('#list')).includes('<b>Dela'),
+    noScriptInjected: (await p.$$('#list script')).length === 0 && !all.html.includes('<b>Dela'),
     phoneNoSim: !(await p.innerHTML('#list > :nth-child(2 of .card)')).includes('SIM - ') && !(await p.innerHTML('#list > :nth-child(2 of .card)')).includes('Yard WiFi load'),
     carmenNoLoad: txt.includes('No load recorded yet'),
     modem: txt.includes('Yard WiFi load') && txt.includes('about 9.99 GB of 16 GB') && txt.includes('12 days') && txt.includes('TEST day 3 of 14')
       && txt.includes('13 texts in the modem') && txt.includes('restarted 1x'),
     modemNotRead: txt.includes('Not read yet. The tablet reads the PLDT modem'),
-    modemBtns: (await p.$$('button[data-cmd="read_modem"]')).length === 2,
-    retryBtn: (await p.$$('button[data-cmd="retry_punches"]')).length === 1, wifiBtn: (await p.$$('button[data-cmd="set_wifi"]')).length === 3 };
+    modemBtns: all.cnt.read_modem === 2, retryBtn: all.cnt.retry_punches === 1, wifiBtn: all.cnt.set_wifi === 3,
+    restartBtns: all.cnt.restart === 3,
+    batteryPart: txt.includes('BATTERY LIFE') && txt.includes('Still measuring') };
   Object.assign(checks, early);
   await p.screenshot({ path: require('os').tmpdir() + '/tab1.png', fullPage: true });
   // record a yard load (prompts)
   const answers = ['16', '2026-11-17']; p.on('dialog', d => d.accept(answers.shift()));
+  await p.click('#list > :nth-child(3 of .card) .tile:has-text("Yard WiFi")'); await p.waitForTimeout(200);
   await p.click('#list > :nth-child(3 of .card) button.primary:has-text("Record yard load")'); await p.waitForTimeout(400);
   checks.modemSaved = !!modemSaved && modemSaved.p_device === 'app-3' && modemSaved.p.add_gb === '16' && modemSaved.p.load_date === '2026-11-17';
   p.removeAllListeners('dialog');
   // open record load, no reader (CDN blocked): file -> proof kept, typed details saved
-  // the owner taps the folded "SIM - GOMO" part open (it stays open across refreshes), then Record load
-  await p.click('#list > :nth-child(1 of .card) summary:has-text("SIM - GOMO")'); await p.waitForTimeout(100);   // tile opened it: tap closes
-  checks.partCloses = !(await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")'));
-  await p.click('#list > :nth-child(1 of .card) summary:has-text("SIM - GOMO")'); await p.waitForTimeout(100);
+  // the owner opens SIM on Mandaue (it stays open across refreshes), then Record load
+  await p.click('#list > :nth-child(1 of .card) .tile:has-text("SIM GOMO")'); await p.waitForTimeout(100);
   checks.partOpens = await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');
   await p.evaluate(() => load()); await p.waitForTimeout(300);
   checks.partStaysOpen = await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');

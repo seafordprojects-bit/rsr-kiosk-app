@@ -426,6 +426,7 @@ final class Core {
                         : st == BatteryManager.BATTERY_STATUS_NOT_CHARGING ? "not_charging" : "unknown");
                 int temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Integer.MIN_VALUE);   // tenths of a degree C
                 if (temp != Integer.MIN_VALUE && temp > -200 && temp < 1000) p.put("battery_temp", temp / 10.0);
+                BatteryHealth.addTo(ctx, b, p);   // owner 2026-11-18: battery wear (replace before it fails)
             }
             net.addTo(p);
             SimWatch.addTo(ctx, p);   // build-6: connection type, SIM, mobile data used
