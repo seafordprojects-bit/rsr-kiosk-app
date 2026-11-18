@@ -820,32 +820,44 @@ await q(`delete from sent`);
 const BW='app-bwtab', MAN='https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen';
 const bb=(x)=>beat(Object.assign({device_id:BW,battery:60,charging:true,page_url:MAN,batt_design_mah:5100,batt_health:'good',batt_cycles:212},x||{}));
 await bb({name:'Batt Kiosk'}); await bb();
+// one reading per 30 minutes is taken: rr() clears the 30-minute clock (as if 30 minutes passed)
+const rr=async(x)=>{ await q(`update kiosk_app_devices set batt_cap_at=null where device_id=$1`,[BW]); return bb(x); };
 const D=async()=>(await q(`select * from kiosk_app_devices where device_id=$1`,[BW]))[0];
 const sentN=async(s)=>(await q(`select msg from sent where msg like $1`,['%'+s+'%'])).length;
 await q(`delete from sent`);
 let d=await D(); ok(d.batt_design_mah===5100 && d.batt_health==='good' && d.batt_cycles===212,'battery: design 5100 mAh, health good, 212 cycles saved');
-await bb({batt_full_mah:'abc'}); await bb({batt_full_mah:900}); await bb({batt_full_mah:9000});
+await rr({batt_full_mah:'abc'}); await rr({batt_full_mah:900}); await rr({batt_full_mah:9000});
 d=await D(); ok(d.batt_cap_n===0,'battery: odd readings (text, under 30% or over 130% of new) ignored');
-for (let i=0;i<29;i++) await bb({batt_full_mah:3800});
+await rr({batt_full_mah:3800}); await bb({batt_full_mah:3800});
+ok((await D()).batt_cap_n===1,'two readings within 30 minutes: only one counted');
+for (let i=0;i<28;i++) await rr({batt_full_mah:3800});
 d=await D(); ok(d.batt_cap_n===29 && Number(d.batt_cap_mah)===3800 && await sentN('battery')===0,'29 readings: not judged yet');
 let L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===BW);
 ok(L.batt_wear_pct===null && L.batt_cap_mah===null,'Tablets page: no battery-life figure before 30 readings');
-await bb({batt_full_mah:3800});
+await rr({batt_full_mah:3800});
 ok(await sentN('Batt Kiosk - battery is wearing: a full charge holds about 75% of a new battery (3800 of 5100 mAh). Plan a battery replacement.')===1,'30th reading: 75% -> "battery is wearing" Telegram');
 L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===BW);
 ok(L.batt_wear_pct===75 && L.batt_cap_mah===3800 && L.batt_cycles===212,'Tablets page: battery life 75%, 3800 mAh, 212 cycles');
-await bb({batt_full_mah:3800});
+await rr({batt_full_mah:3800});
 ok(await sentN('battery is wearing')===1,'wearing alert sent once');
-for (let i=0;i<20;i++) await bb({batt_full_mah:3000});   // 3800*0.95^20 + 3000*(1-0.95^20) = about 3287 = 64%
+for (let i=0;i<20;i++) await rr({batt_full_mah:3000});   // 3800*0.95^20 + 3000*(1-0.95^20) = about 3287 = 64%
 d=await D(); ok(Math.round(Number(d.batt_cap_mah)/51)<65 && await sentN('BATTERY WORN OUT')===1,'under 65% -> "WORN OUT, replace" once ('+Math.round(Number(d.batt_cap_mah))+' mAh)');
-await bb({batt_full_mah:3000});
+await rr({batt_full_mah:3000});
 ok(await sentN('BATTERY WORN OUT')===1,'worn-out alert not repeated');
-await q(`update kiosk_app_devices set batt_cap_mah=5050 where device_id=$1`,[BW]); await bb({batt_full_mah:5050});
-ok((await D()).batt_wear_alerted===null,'new battery (over 90%): alerts reset');
+await q(`update kiosk_app_devices set batt_cap_mah=4400 where device_id=$1`,[BW]); await rr({batt_full_mah:4400});
+ok((await D()).batt_wear_alerted===null,'new battery reading 86% (service-centre battery): alerts reset');
 await bb({batt_health:'dead'});
 ok(await sentN('Batt Kiosk - Android reports the battery as DEAD')===1,'Android says DEAD: Telegram');
 await bb({batt_health:'dead'}); ok(await sentN('reports the battery as')===1,'dead alert once');
+await bb({batt_health:'good'}); await bb({batt_health:'dead'}); await bb({batt_health:'good'}); await bb({batt_health:'dead'});
+ok(await sentN('reports the battery as')===1,'battery flipping dead / good: at most one Telegram a day');
+await q(`update kiosk_app_devices set batt_bad_at=now()-interval '25 hours' where device_id=$1`,[BW]); await bb({batt_health:'over_voltage'});
+ok(await sentN('OVER VOLTAGE. Check the charger and cable first')===1,'over voltage: check the charger (next day)');
 await bb({batt_health:'good'}); ok((await D()).batt_bad_alerted===false,'health good again: reset');
+// a single odd FIRST reading does not decide: plain average for the first 30 (1600 + 29 x 4700 = about 4597 = 90%)
+await q(`update kiosk_app_devices set batt_cap_mah=null, batt_cap_n=0, batt_wear_alerted=null where device_id=$1`,[BW]); await q(`delete from sent`);
+await rr({batt_full_mah:1600}); for (let i=0;i<29;i++) await rr({batt_full_mah:4700});
+ok(await sentN('battery is wearing')===0 && Math.round(Number((await D()).batt_cap_mah))===4597,'one low first reading: no false "wearing" (average 4597 mAh = 90%)');
 await bb({batt_health:'<script>'}); ok((await D()).batt_health==='good','unknown health text ignored');
 await q(`delete from kiosk_app_devices where device_id=$1`,[BW]); await q(`delete from sent`);
 }

@@ -57,19 +57,7 @@
   .bar{height:10px;border-radius:99px;background:var(--line);overflow:hidden;margin:6px 0}
   .bar span{display:block;height:100%;border-radius:99px}
   @media (prefers-color-scheme:dark){.tile.on,.chip.on{border-color:#8fb8e8;box-shadow:inset 0 -3px 0 #8fb8e8}.panel{border-color:#3b5b85}}
-  .acc{border-top:1px solid var(--line);margin:10px -14px 0;padding:0 14px}
-  .acc details{border-bottom:1px solid var(--line);margin:0;scroll-margin-top:64px}
-  .acc details:last-child{border-bottom:0}
-  .acc summary{list-style:none;display:flex;align-items:center;gap:8px;min-height:50px;padding:6px 0;color:var(--ink);font-size:16px}
-  .acc summary::-webkit-details-marker{display:none}
-  .acc summary::before{content:"";flex:none;width:8px;height:8px;border-right:2px solid var(--mute);border-bottom:2px solid var(--mute);transform:rotate(-45deg);margin:0 6px 0 2px;transition:transform .15s}
-  .acc details[open]>summary::before{transform:rotate(45deg)}
-  .acc summary .t{font-weight:600;flex:none}
-  .acc summary .s{flex:1;min-width:0;text-align:right;color:var(--mute);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .acc summary .s.bad{color:var(--bad);font-weight:600} .acc summary .s.warn{color:var(--warn);font-weight:600} .acc summary .s.ok{color:var(--ok)}
-  .acc .body{padding:0 0 12px}
-  .acc .body>div{margin:3px 0}
-  .acc .btns{margin-top:10px}
+  .panel .btns{margin-top:10px}
   .danger-zone{border:1px solid color-mix(in srgb,var(--bad) 40%,transparent);border-radius:12px;padding:10px;margin-top:10px}
   .danger-zone p{margin:0 0 8px;font-size:13px;color:var(--mute)}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
@@ -304,10 +292,11 @@ function issues(t) {
   if (t.battery_temp >= 45) add('bad', 'Battery hot: ' + t.battery_temp + ' °C', 'battery');
   else if (t.battery_temp >= 40) add('warn', 'Battery warm: ' + t.battery_temp + ' °C', 'battery');
   // battery wear (owner 2026-11-18): replace before it fails
-  if (['dead', 'failure', 'over_voltage'].includes(t.batt_health)) add('bad', 'Android says the battery is ' + t.batt_health.replace('_', ' ').toUpperCase() + ' - replace it', 'battery');
+  if (['dead', 'failure'].includes(t.batt_health)) add('bad', 'Android says the battery is ' + t.batt_health.toUpperCase() + ' - replace it', 'battery');
+  if (t.batt_health === 'over_voltage') add('bad', 'Battery OVER VOLTAGE - check the charger and cable', 'battery');
   if (t.batt_wear_pct != null && t.batt_wear_pct < 65) add('bad', 'Battery worn out (holds ' + t.batt_wear_pct + '% of new) - replace it', 'battery');
   else if (t.batt_wear_pct != null && t.batt_wear_pct < 80) add('warn', 'Battery wearing (holds ' + t.batt_wear_pct + '% of new) - plan a replacement', 'battery');
-  else if (t.drain_on >= 20) add('warn', 'Battery runs down fast (full charge about ' + Math.round(100 / t.drain_on) + ' h with the screen on)', 'battery');
+  else if (!phone && t.drain_on >= 20) add('warn', 'Battery runs down fast (full charge about ' + Math.round(100 / t.drain_on) + ' h with the screen on)', 'battery');
   const p = t.punches;
   if (p && +p.stuck) add('bad', p.stuck + ' stuck punch' + (+p.stuck > 1 ? 'es' : '') + ' (will not sync by themselves)', 'punches');
   else if (p && (+p.queue || 0) + (+p.offline_queue || 0)) add('warn', ((+p.queue || 0) + (+p.offline_queue || 0)) + ' punches waiting to sync', 'punches');
@@ -460,7 +449,8 @@ function batteryPart(t, phone) {
       ${life != null ? `<div class="lifeval" style="color:${col}">${esc(life)}%</div>
         <div class="bar"><span style="width:${Math.max(3, Math.min(100, +life))}%;background:${col}"></span></div>
         <div>${verdict} <span class="mute">A full charge holds about ${esc(t.batt_cap_mah)} of ${esc(t.batt_design_mah)} mAh.</span></div>`
-      : `<div class="mute">Still measuring - the tablet needs about 30 minutes between 30% and 95% charge${t.batt_cap_n ? ' (' + esc(Math.min(t.batt_cap_n, 30)) + ' of 30 readings)' : ''}${t.batt_design_mah ? '' : '; this tablet does not tell its size when new'}. Needs app build 22 or newer.</div>`}
+      : t.batt_cap_n >= 30 ? `<div class="mute">This tablet does not report its size when new (or reports a wrong one), so battery life cannot be worked out. Watch "Full charge lasts" below instead.</div>`
+      : `<div class="mute">Still measuring - one reading every 30 minutes while the charge is between 30% and 95% (${esc(Math.min(t.batt_cap_n || 0, 30))} of 30 readings)${t.batt_design_mah ? '' : '; this tablet does not tell its size when new'}. Needs app build 22 or newer.</div>`}
     </div>
     <dl class="kv">
       ${row('Charge now', t.battery == null ? '-' : esc(t.battery) + '%' + (t.charging ? ' (charging)' : ' (NOT charging)'))}
@@ -470,7 +460,7 @@ function batteryPart(t, phone) {
       ${row('Android says', hl ? '<span style="color:' + (t.batt_health === 'good' ? 'inherit' : 'var(--bad)') + '">' + hl + '</span>' : '-')}
       ${row('Charge cycles', t.batt_cycles != null ? esc(t.batt_cycles) : '<span class="mute">not reported</span>')}
     </dl>
-    <div class="mute" style="margin-top:6px">Telegram warns you once when the battery life drops under 80% (plan a replacement) and under 65% (replace).</div>`;
+    <div class="mute" style="margin-top:6px">Telegram warns you once when the battery life drops under 80% (plan a replacement) and under 65% (replace). The figure settles after a few days.</div>`;
 }
 
 function detailsPart(t, phone) {

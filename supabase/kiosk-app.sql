@@ -265,7 +265,9 @@ alter table public.kiosk_app_devices add column if not exists batt_design_mah   
 alter table public.kiosk_app_devices add column if not exists batt_cap_mah      numeric(7,1);   -- what a full charge holds now (averaged)
 alter table public.kiosk_app_devices add column if not exists batt_cap_n        integer not null default 0;
 alter table public.kiosk_app_devices add column if not exists batt_wear_alerted integer;   -- 80 / 65 = that alert was sent
-alter table public.kiosk_app_devices add column if not exists batt_bad_alerted  boolean not null default false;   -- why the last modem read failed (shown only)
+alter table public.kiosk_app_devices add column if not exists batt_bad_alerted  boolean not null default false;
+alter table public.kiosk_app_devices add column if not exists batt_cap_at       timestamptz;   -- last reading taken into the average
+alter table public.kiosk_app_devices add column if not exists batt_bad_at       timestamptz;   -- last time Android said dead / failure
 
 create sequence if not exists public.kiosk_app_cmd_seq;
 revoke all on sequence public.kiosk_app_cmd_seq from anon, authenticated;
@@ -478,16 +480,20 @@ begin
     end if;
   end if;
 
-  -- BATTERY WEAR (owner 2026-11-18). The tablet reports what a full charge holds now (read between 30% and 95%);
-  -- one reading is rough, so the server keeps a slow average (95% old / 5% new) and judges only after 30 readings.
-  -- Worn = holds less than 80% of new (plan a replacement) / less than 65% (replace soon). Telegram once per level;
-  -- back above 90% (new battery) resets it.
-  if coalesce(p->>'batt_full_mah', '') ~ '^[0-9]{3,5}$' then
+  -- BATTERY WEAR (owner 2026-11-18). The tablet reports what a full charge holds now (read between 30% and 95%).
+  -- One reading is rough, so the server takes at most ONE reading every 30 minutes (so the average covers many days
+  -- and charge levels, not one half hour at one level), a plain average for the first 30, then a slow one (95% old /
+  -- 5% new). Judged only after 30 readings (15 hours or more). Worn = holds less than 80% of new (plan a replacement)
+  -- / less than 65% (replace). Telegram once per level; back at 85% or more (a new battery) resets it.
+  if coalesce(p->>'batt_full_mah', '') ~ '^[0-9]{3,5}$' and (d.batt_cap_at is null or d.batt_cap_at < now() - interval '30 minutes') then
     v_full := (p->>'batt_full_mah')::integer;
     if v_full between 500 and 30000 and (d.batt_design_mah is null or v_full between d.batt_design_mah * 0.3 and d.batt_design_mah * 1.3) then
       update public.kiosk_app_devices k set
-        batt_cap_mah = case when k.batt_cap_mah is null or k.batt_cap_n = 0 then v_full else round(k.batt_cap_mah * 0.95 + v_full * 0.05, 1) end,
-        batt_cap_n = least(k.batt_cap_n + 1, 1000000)
+        batt_cap_mah = case when k.batt_cap_mah is null or k.batt_cap_n = 0 then v_full
+                            when k.batt_cap_n < 30 then round((k.batt_cap_mah * k.batt_cap_n + v_full) / (k.batt_cap_n + 1), 1)
+                            else round(k.batt_cap_mah * 0.95 + v_full * 0.05, 1) end,
+        batt_cap_n = least(k.batt_cap_n + 1, 1000000),
+        batt_cap_at = now()
        where k.device_id = v_id
        returning k.batt_cap_mah, k.batt_cap_n into d.batt_cap_mah, d.batt_cap_n;
     end if;
@@ -504,14 +510,20 @@ begin
       perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - battery is wearing: a full charge holds about '
               || v_wear || '% of a new battery (' || round(d.batt_cap_mah) || ' of ' || d.batt_design_mah
               || ' mAh). Plan a battery replacement.');
-    elsif v_wear >= 90 and d.batt_wear_alerted is not null then
+    elsif v_wear >= 85 and d.batt_wear_alerted is not null then
       update public.kiosk_app_devices k set batt_wear_alerted = null where k.device_id = v_id;
     end if;
   end if;
-  if d.batt_health in ('dead','over_voltage','failure') and not d.batt_bad_alerted then
-    update public.kiosk_app_devices k set batt_bad_alerted = true where k.device_id = v_id;
-    perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - Android reports the battery as '
-            || upper(replace(d.batt_health, '_', ' ')) || '. Replace the battery (Samsung service center).');
+  -- Android's own verdict: at most one Telegram a day (a battery that flips dead/good does not flood);
+  -- OVER VOLTAGE on Samsung usually means the charger or cable
+  if d.batt_health in ('dead','over_voltage','failure') then
+    if d.batt_bad_at is null or d.batt_bad_at < now() - interval '24 hours' then
+      perform public.kiosk_alert_send('RSR Kiosk: ' || coalesce(nullif(d.name, ''), v_id) || ' - Android reports the battery as '
+              || upper(replace(d.batt_health, '_', ' ')) || '. '
+              || case when d.batt_health = 'over_voltage' then 'Check the charger and cable first (use the original Samsung charger).'
+                      else 'Replace the battery (Samsung service center).' end);
+      update public.kiosk_app_devices k set batt_bad_at = now(), batt_bad_alerted = true where k.device_id = v_id;
+    end if;
   elsif d.batt_health = 'good' and d.batt_bad_alerted then
     update public.kiosk_app_devices k set batt_bad_alerted = false where k.device_id = v_id;
   end if;
@@ -1957,7 +1969,7 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('net_type','net_since','mobile_alerted','mobile_signal','mobile_ok','mobile_bad_since','mobile_bad_alerted',
                               'sim_operator','sim_state','sms_ok','sim_provider','sim_close_days','sim_alerts','load_wait_from','battery_unrestricted')) as build6_columns;
--- build-7 check (yard WiFi modem + battery wear): expect 2 tables, 8 functions, 8 columns
+-- build-7 check (yard WiFi modem + battery wear): expect 2 tables, 8 functions, 10 columns
 select (select count(*) from information_schema.tables where table_schema = 'public'
           and table_name in ('kiosk_app_modem','kiosk_app_modem_reads')) as build7_tables,
        (select count(*) from pg_proc where pronamespace = 'public'::regnamespace
@@ -1965,4 +1977,4 @@ select (select count(*) from information_schema.tables where table_schema = 'pub
                           'kiosk_app_modem_info','kiosk_app_modem_set','kiosk_app_modem_msg','kiosk_app_tick')) as build7_functions,
        (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kiosk_app_devices'
           and column_name in ('modem_err','batt_health','batt_cycles','batt_design_mah','batt_cap_mah','batt_cap_n',
-                              'batt_wear_alerted','batt_bad_alerted')) as build7_columns;
+                              'batt_wear_alerted','batt_bad_alerted','batt_cap_at','batt_bad_at')) as build7_columns;
