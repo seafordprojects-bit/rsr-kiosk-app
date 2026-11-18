@@ -157,7 +157,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-19b';
+const PAGE_VERSION = 'v2026-11-19c';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -326,6 +326,8 @@ function issues(t) {
   else if (m && m.load_gb != null && +m.left_gb < 10) add('warn', 'Yard WiFi load under 10 GB', 'modem');
   if (t.modem_err && m && m.load_gb != null) add('warn', 'Modem read problem: ' + t.modem_err, 'modem');
   if (m && m.load_gb == null) add('warn', 'Yard WiFi load not recorded yet', 'modem');
+  if (m && m.sim === 'missing') add('bad', 'Yard WiFi modem SIM MISSING or not working', 'modem');
+  if (s.state === 'absent') add('bad', 'No SIM in the tablet (removed?) - no backup internet', 'sim');
   return out;
 }
 const lvlOf = (iss, sec) => iss.some(x => x.sec === sec && x.lvl === 'bad') ? 'bad' : iss.some(x => x.sec === sec) ? 'warn' : '';
@@ -670,7 +672,7 @@ function modemPart(t) {
     <div>Used today: <b>${esc(gb(m.used_today_gb))}</b> - last 7 days: <b>${esc(gb(m.used_7d_gb))}</b></div>
     <div class="mute">Last modem read ${m.last_read_at ? esc(hhmm(m.last_read_at)) + ' (' + esc(ago(m.last_read_at)) + ')' : '-'}
       ${m.restarts ? ' - modem restarted ' + esc(m.restarts) + 'x since the load (figure may be a bit low)' : ''}
-      ${m.inbox != null ? ' - ' + esc(m.inbox) + ' texts in the modem' : ''}</div>
+      ${m.inbox != null ? ' - ' + esc(m.inbox) + ' texts in the modem' : ''}${m.sim ? ' - modem SIM ' + (m.sim === 'ok' ? 'OK' : '<b style="color:var(--bad)">MISSING</b>') : ''}</div>
     ${m.inbox >= 450 ? '<div class="warnbox">Modem inbox almost full: delete old texts at http://192.168.1.1 &gt; Tools &gt; SMS (on the yard WiFi).</div>' : ''}
     ${err}${btns}` };
 }

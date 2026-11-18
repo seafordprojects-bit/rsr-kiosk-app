@@ -928,6 +928,38 @@ R=await hb(); ok(R.sleep_from==='' && R.sleep_until==='','tablet told: no plan')
 await q(`delete from kiosk_app_power_log where device_id=$1`,[HS]); await q(`delete from kiosk_app_devices where device_id=$1`,[HS]); await q(`delete from sent`);
 }
 
+// ---- SIM removed / changed (owner 2026-11-19, anti-tamper) ----
+{
+const SI='app-simtab', MAN='https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen';
+const sb=(x)=>beat(Object.assign({device_id:SI,battery:80,charging:true,page_url:MAN},x||{}));
+await sb({name:'Sim Kiosk',sim_state:'ready',sim_operator:'DITO'}); await sb({sim_state:'ready',sim_operator:'DITO'});
+const sentN=async(s)=>(await q(`select msg from sent where msg like $1`,['%'+s+'%'])).length;
+const clr=async()=>q(`update kiosk_app_devices set sim_alert_at=null where device_id=$1`,[SI]);
+await q(`delete from sent`);
+await sb({sim_state:'unknown'}); await sb({sim_state:'ready',sim_operator:'DITO'});
+ok(await sentN('Sim Kiosk')===0,'SIM unknown while starting: no alert');
+await sb({sim_state:'absent',sim_operator:''});
+ok(await sentN('Sim Kiosk - SIM REMOVED (DITO,')===1,'SIM pulled out: Telegram at once');
+await sb({sim_state:'absent'}); ok(await sentN('SIM REMOVED')===1,'still out: no repeat');
+await clr(); await sb({sim_state:'ready',sim_operator:'Smart'});
+ok(await sentN('Sim Kiosk - SIM is back in (Smart). It is a DIFFERENT SIM: was DITO, now Smart.')===1,'SIM back but a different one: said so');
+await clr(); await sb({sim_state:'ready',sim_operator:'GOMO'});
+ok(await sentN('Sim Kiosk - SIM CHANGED: was Smart, now GOMO')===1,'SIM swapped while on: alert');
+await sb({sim_state:'absent'}); await sb({sim_state:'ready',sim_operator:'GOMO'});
+ok(await sentN('SIM REMOVED')===1,'flapping within 2 minutes: no flood');
+await beat({device_id:SI,token:'wrong',battery:80,page_url:MAN,sim_state:'absent'});
+ok(await sentN('SIM REMOVED')===1,'wrong secret: no alert');
+// yard modem SIM
+await sb({modem:{at:new Date(Date.now()-120000).toISOString().replace(/\.\d+Z$/,'Z'),host:'192.168.1.1',total_bytes:1000,sim:'ok'}});
+ok(await sentN('modem says its SIM')===0,'modem SIM ok first time: no alert');
+await sb({modem:{at:new Date(Date.now()-60000).toISOString().replace(/\.\d+Z$/,'Z'),host:'192.168.1.1',total_bytes:1100,sim:'missing'}});
+ok(await sentN('Sim Kiosk - the yard WiFi modem says its SIM is MISSING')===1,'modem SIM pulled out: Telegram');
+await sb({modem:{at:new Date().toISOString().replace(/\.\d+Z$/,'Z'),host:'192.168.1.1',total_bytes:1200,sim:'bogus'}});
+ok((await q(`select sim from kiosk_app_modem where device_id=$1`,[SI]))[0].sim==='missing','odd modem SIM text ignored');
+await q(`delete from kiosk_app_modem where device_id=$1`,[SI]); await q(`delete from kiosk_app_modem_reads where device_id=$1`,[SI]);
+await q(`delete from kiosk_app_devices where device_id=$1`,[SI]); await q(`delete from sent`);
+}
+
 // anon cannot read tables
 // the owner's go-live check (supabase/paste/build7-public-check.sql): every table "public can read = false"
 { const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===11 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 11 tables'); }

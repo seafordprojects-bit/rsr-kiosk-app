@@ -16,6 +16,10 @@ final class ModemXml {
         long totalBytes, totalSecs = -1, dayBytes = -1, monthBytes = -1;
         int inbox = -1;
         String monthClear = "";
+        /** owner 2026-11-19: modem SIM - "ok" / "missing" (SimStatus 1 = good SIM), "" = the modem did not say. */
+        String sim = "";
+        /** modem's mobile connection: "connected" (901) / "disconnected" / "" = unknown. */
+        String conn = "";
     }
 
     /** Whole number inside &lt;name&gt;...&lt;/name&gt; (digits only, at most 15), else -1. */
@@ -33,6 +37,17 @@ final class ModemXml {
         int b = xml.indexOf("</" + name + ">", a);
         if (b < 0 || b - a > 64) return null;
         return xml.substring(a, b).trim();
+    }
+
+    /** As parse(traffic, month, sms), plus /api/monitoring/status (may be null or a login error: then unknown). */
+    static Reading parse(String traffic, String month, String sms, String status) {
+        Reading r = parse(traffic, month, sms);
+        if (r == null || status == null || status.contains("<error>")) return r;
+        long sim = num(status, "SimStatus");
+        if (sim >= 0) r.sim = sim == 1 ? "ok" : "missing";
+        long cs = num(status, "ConnectionStatus");
+        if (cs >= 0) r.conn = cs == 901 ? "connected" : "disconnected";
+        return r;
     }
 
     /** traffic is required; month and sms may be null (not answered). Null when traffic is not a modem answer. */

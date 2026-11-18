@@ -81,7 +81,8 @@ final class ModemRead {
             String traffic = get(wifi, h, "/api/monitoring/traffic-statistics");
             ModemXml.Reading r = ModemXml.parse(traffic, null, null);
             if (r == null) continue;
-            r = ModemXml.parse(traffic, get(wifi, h, "/api/monitoring/month_statistics"), get(wifi, h, "/api/sms/sms-count"));
+            r = ModemXml.parse(traffic, get(wifi, h, "/api/monitoring/month_statistics"), get(wifi, h, "/api/sms/sms-count"),
+                    get(wifi, h, "/api/monitoring/status"));
             if (r == null) continue;
             try {
                 JSONObject m = new JSONObject();
@@ -93,6 +94,8 @@ final class ModemRead {
                 if (r.monthBytes >= 0) m.put("month_bytes", r.monthBytes);
                 if (!r.monthClear.isEmpty()) m.put("month_clear", r.monthClear);
                 if (r.inbox >= 0) m.put("inbox", r.inbox);
+                if (!r.sim.isEmpty()) m.put("sim", r.sim);     // owner 2026-11-19: modem SIM pulled out
+                if (!r.conn.isEmpty()) m.put("conn", r.conn);
                 synchronized (LOCK) { pending = m; lastError = null; }
             } catch (Exception e) {
                 setError("read failed");

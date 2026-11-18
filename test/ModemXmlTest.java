@@ -44,6 +44,15 @@ public class ModemXmlTest {
         ok(ModemXml.due(t + 30 * 60_000L, t, false), "30 min later: due");
         ok(ModemXml.due(t + 60_000L, t, true), "forced (report time / office): due");
         ok(ModemXml.due(t - 60_000L, t, false), "clock moved back: due");
+        // owner 2026-11-19: modem SIM (Huawei /api/monitoring/status), only when the modem answers without a login
+        String ST = "<response><ConnectionStatus>901</ConnectionStatus><SimStatus>1</SimStatus><SignalIcon>4</SignalIcon></response>";
+        r = ModemXml.parse(TRAFFIC, MONTH, SMS, ST);
+        ok(r != null && "ok".equals(r.sim) && "connected".equals(r.conn), "modem SIM ok, connected");
+        r = ModemXml.parse(TRAFFIC, MONTH, SMS, "<response><ConnectionStatus>902</ConnectionStatus><SimStatus>255</SimStatus></response>");
+        ok(r != null && "missing".equals(r.sim) && "disconnected".equals(r.conn), "modem SIM missing (255), disconnected");
+        r = ModemXml.parse(TRAFFIC, MONTH, SMS, ERR);
+        ok(r != null && r.sim.isEmpty() && r.conn.isEmpty() && r.totalBytes > 0, "status needs a login: SIM unknown, counter still read");
+        ok(ModemXml.parse(ERR, MONTH, SMS, ST) == null, "no counter: no reading at all");
         System.out.println(pass + " passed, " + fail + " failed");
         if (fail > 0) System.exit(1);
     }

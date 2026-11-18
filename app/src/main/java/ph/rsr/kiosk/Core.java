@@ -257,6 +257,20 @@ final class Core {
         } catch (Exception e) {
             Log.w(TAG, "watch calls", e);
         }
+        // owner 2026-11-19: SIM pulled out / swapped -> report at once (the server sends the Telegram)
+        try {
+            ctx.registerReceiver(new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent i) {
+                    String st = i.getStringExtra("ss");   // ABSENT / READY / LOADED / LOCKED ...
+                    if (st == null || "ABSENT".equals(st) || "READY".equals(st) || "LOADED".equals(st) || "LOCKED".equals(st)) {
+                        bg.postDelayed(Core.this::beat, 3000);
+                    }
+                }
+            }, new IntentFilter("android.intent.action.SIM_STATE_CHANGED"));
+        } catch (Exception e) {
+            Log.w(TAG, "watch sim", e);
+        }
     }
 
     private void callWake() {

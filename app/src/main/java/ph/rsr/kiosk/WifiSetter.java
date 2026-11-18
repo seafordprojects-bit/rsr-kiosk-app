@@ -30,6 +30,18 @@ final class WifiSetter {
     }
 
     @SuppressWarnings("deprecation")
+    private static String currentSsid(WifiManager wm) {
+        try {
+            android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
+            String s = wi == null ? null : wi.getSSID();
+            if (s == null || s.equals("<unknown ssid>")) return "";
+            return s.startsWith("\"") && s.endsWith("\"") && s.length() >= 2 ? s.substring(1, s.length() - 1) : s;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    @SuppressWarnings("deprecation")
     static String apply(Context ctx, String arg) {
         try {
             if (!Policy.isOwner(ctx)) return "failed: needs full lock (device owner)";
@@ -42,6 +54,9 @@ final class WifiSetter {
             WifiManager wm = (WifiManager) ctx.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             if (wm == null) return "failed: no Wi-Fi";
             if (!wm.isWifiEnabled()) wm.setWifiEnabled(true);   // allowed for a device owner
+            // already on that Wi-Fi with internet (e.g. it was joined by hand in Settings): nothing to change
+            // (owner 2026-11-17: "Android refused the network" for a Wi-Fi the tablet was already using)
+            if (sw && ssid.equals(currentSsid(wm)) && onWifiWithInternet(ctx, wm, -1)) return "done: already connected to " + ssid;
             WifiConfiguration w = new WifiConfiguration();
             w.SSID = "\"" + ssid + "\"";
             if (pass.isEmpty()) {
@@ -55,13 +70,27 @@ final class WifiSetter {
             java.util.List<WifiConfiguration> before = null;
             try { before = wm.getConfiguredNetworks(); } catch (Exception ignored) { }
             int id = -1;
-            if (before != null) {   // the same name saved before (old password): update it instead of adding a second one
-                for (WifiConfiguration c : before) {
-                    if (w.SSID.equals(c.SSID)) { w.networkId = c.networkId; id = wm.updateNetwork(w); break; }
-                }
+            WifiConfiguration saved = null;
+            if (before != null) for (WifiConfiguration c : before) if (w.SSID.equals(c.SSID)) { saved = c; break; }
+            if (saved != null) {   // the same name saved before (old password): update it instead of adding a second one
+                w.networkId = saved.networkId;
+                id = wm.updateNetwork(w);
             }
-            if (id < 0) id = wm.addNetwork(w);
-            if (id < 0) return "failed: Android refused the network";
+            // fallbacks (2026-11-19): Android refuses to update a Wi-Fi saved by hand in Settings, and refuses a network
+            // config that still carries that old id - try as a NEW network, then WPA3 for a WPA3-only router, then
+            // remove the hand-saved copy (device owner may) and add it again
+            if (id < 0) { w.networkId = -1; id = wm.addNetwork(w); }
+            if (id < 0 && !pass.isEmpty() && android.os.Build.VERSION.SDK_INT >= 29) {
+                WifiConfiguration w3 = new WifiConfiguration();
+                w3.SSID = w.SSID;
+                w3.preSharedKey = w.preSharedKey;
+                w3.setSecurityParams(WifiConfiguration.SECURITY_TYPE_SAE);
+                id = wm.addNetwork(w3);
+            }
+            if (id < 0 && saved != null) {
+                try { if (wm.removeNetwork(saved.networkId)) id = wm.addNetwork(w); } catch (Exception ignored) { }
+            }
+            if (id < 0) return "failed: Android refused the network" + (saved != null ? " (" + ssid + " was saved by hand: forget it in Settings > Wi-Fi, then try again)" : "");
             if (!sw) {
                 wm.enableNetwork(id, false);
                 return "done: saved " + ssid + " (used when the current Wi-Fi is gone)";
