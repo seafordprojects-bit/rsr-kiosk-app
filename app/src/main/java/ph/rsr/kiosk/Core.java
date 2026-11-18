@@ -72,11 +72,22 @@ final class Core {
 
     void touched() {
         lastTouch = android.os.SystemClock.elapsedRealtime();
+    }
+
+    /** A real hand on the screen (KioskActivity.dispatchTouchEvent only - never the app's own screen wakes).
+     *  Holiday sleep counts "used today" and "untouched" from this, and a sleeping kiosk wakes at once. */
+    void handTouched() {
+        touched();
+        handTouch = android.os.SystemClock.elapsedRealtime();
+        sleepPending = false;   // enterSleep in progress: abandon it, someone is here
         long now = System.currentTimeMillis();
         if (now - lastTouchSaved > 60_000) { lastTouchSaved = now; prefs.setLastTouchWall(now); }
         if (prefs.sleeping()) bg.post(() -> exitSleep("screen touched"));
     }
+    private volatile long handTouch = 0;
+    private volatile boolean sleepPending = false;
     private long lastTouchSaved = 0;
+    private long handIdleMs() { return android.os.SystemClock.elapsedRealtime() - handTouch; }
 
     // ---- punch safety --------------------------------------------------------------------------
     // Owner rule: never block, delay or lose a punch. Anything that stops or reloads the kiosk page
@@ -206,8 +217,17 @@ final class Core {
         KeepAlive.start(ctx);   // foreground class: never frozen, network kept (device owner may start it any time)
         bg.removeCallbacksAndMessages(null);
         watchPower();
-        if (!rawPlugged() && PowerLog.unpluggedSince(ctx) == 0) PowerLog.setUnpluggedSince(ctx, System.currentTimeMillis());
-        if (rawPlugged()) PowerLog.setUnpluggedSince(ctx, 0L);
+        // power log: Android sends no "power connected" at start; a cut still open when power came back while the app
+        // was not running is closed here (review 2026-11-19)
+        if (rawPlugged()) {
+            if (PowerLog.unpluggedSince(ctx) != 0) PowerLog.add(ctx, "on", batteryPct());
+            PowerLog.setUnpluggedSince(ctx, 0L);
+        } else if (PowerLog.unpluggedSince(ctx) == 0) {
+            PowerLog.setUnpluggedSince(ctx, System.currentTimeMillis());
+        }
+        // a restart (crash, update, manual) in the middle of a deep sleep ends it: the screen is on and the page is
+        // fresh, so the safe side for punches is awake. The saver puts it back to sleep by its rules.
+        if (prefs.sleeping()) bg.post(() -> exitSleep("tablet restarted"));
         bg.post(this::loop);
         scheduleNextAlarm();
         scheduleReportAlarm();
@@ -412,6 +432,10 @@ final class Core {
             return;
         }
         try {
+            if (prefs.wifiOffBySleep()) {   // never leave the Wi-Fi off while awake (a crash mid-wake, a refused switch)
+                setWifi(true);
+                if (wifiOn()) prefs.setWifiOffBySleep(false);
+            }
             checkSleepTriggers();
             applyAwake();
             beat();
@@ -956,7 +980,7 @@ final class Core {
                 public void onReceive(Context c, Intent i) {
                     String a = i.getAction();
                     if (Intent.ACTION_SCREEN_ON.equals(a)) {   // power button / anyone: a sleeping kiosk wakes at once
-                        if (prefs.sleeping() && System.currentTimeMillis() > ownScreenOnUntil) bg.post(() -> exitSleep("screen turned on"));
+                        if (prefs.sleeping()) bg.post(() -> exitSleep("screen turned on"));
                         return;
                     }
                     if (Intent.ACTION_SHUTDOWN.equals(a)) { PowerLog.add(ctx, "shutdown", batteryPct()); return; }
@@ -977,7 +1001,6 @@ final class Core {
     // page paused, no check-ins, a short report every 12 hours, and it wakes by itself at 7:00 (or the plan's end).
     // Rules: SleepRules. Any touch, the power button, a phone call, the office Screen on or the charger wakes it.
 
-    private volatile long ownScreenOnUntil = 0;   // our own screen-on (wake at 7:00) is not "someone pressed power"
 
     /** Charger connected at all (any power coming in), unlike plugged() which also checks it keeps up. */
     private boolean rawPlugged() {
@@ -992,18 +1015,28 @@ final class Core {
     /** Background thread. The planned holiday, or the power-cut saver: go to sleep now? Never in maintenance or on the phone. */
     void checkSleepTriggers() {
         try {
-            if (prefs.phone() || prefs.inMaintenance() || prefs.sleeping()) return;
+            if (prefs.phone() || prefs.inMaintenance() || prefs.sleeping() || rawPlugged()) return;
             long now = System.currentTimeMillis();
-            if (SleepRules.inPlan(now, prefs.planFrom(), prefs.planUntil())) { enterSleep("holiday", prefs.planUntil()); return; }
+            int handIdleMin = (int) Math.min(Integer.MAX_VALUE, handIdleMs() / 60_000L);
+            if (SleepRules.inPlan(now, prefs.planFrom(), prefs.planUntil())) {
+                // inside a planned holiday: once a person has woken it, it stays awake until 2 h untouched
+                if (!prefs.planHandWoken() || handIdleMin >= SleepRules.SAVER_AFTER_MIN) enterSleep("holiday", prefs.planUntil());
+                return;
+            }
             long off = PowerLog.unpluggedSince(ctx);
-            int unMin = rawPlugged() || off <= 0 ? -1 : (int) Math.min(Integer.MAX_VALUE, (now - off) / 60_000L);
-            int idleMin = (int) Math.min(Integer.MAX_VALUE, idleMs() / 60_000L);
+            int unMin = off <= 0 ? -1 : (int) Math.min(Integer.MAX_VALUE, (now - off) / 60_000L);
             java.util.Calendar c = java.util.Calendar.getInstance();
             int nowMin = c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE);
             c.set(java.util.Calendar.HOUR_OF_DAY, 0); c.set(java.util.Calendar.MINUTE, 0); c.set(java.util.Calendar.SECOND, 0);
-            boolean touchedToday = Math.max(prefs.lastTouchWall(), lastTouchSaved) >= c.getTimeInMillis() || idleMin < nowMin;
+            long midnight = c.getTimeInMillis();
+            boolean touchedToday = Math.max(prefs.lastTouchWall(), lastTouchSaved) >= midnight || handIdleMin < nowMin;
+            // generator time is counted from today 00:00 and from the last wake, not from yesterday's hours (review:
+            // on day 2 of an outage it would otherwise sleep at 08:15, before late workers arrive)
+            int span = unMin < 0 ? -1 : Math.min(unMin, nowMin);
+            long woke = prefs.lastWakeAt();
+            if (span >= 0 && woke > 0 && woke > now - span * 60_000L) span = (int) ((now - woke) / 60_000L);
             if (SleepRules.saverNow(prefs.powerWindows(), prefs.scheduleEnabled(), prefs.onTime(), prefs.offTime(),
-                    nowMin, unMin, idleMin, touchedToday)) {
+                    nowMin, prefs.powerWindows().trim().isEmpty() ? unMin : span, handIdleMin, touchedToday)) {
                 enterSleep("power cut", SleepRules.nextWake(now));
             }
         } catch (Throwable t) {
@@ -1011,24 +1044,44 @@ final class Core {
         }
     }
 
-    /** Background thread. Push waiting punches, tell the office, then sleep. Not while a worker is mid-punch. */
+    /** Background thread. Push waiting punches, tell the office, then sleep. Not while a worker is mid-punch:
+     *  a touch at any moment before the lights go out cancels it (sleepPending, review 2026-11-19). */
     private void enterSleep(String reason, long until) {
         if (prefs.sleeping() || until <= System.currentTimeMillis()) return;
-        if (inRush() || pageBusyNow() || idleMs() < 60_000) return;   // try again at the next check
-        int b = batteryPct();
+        if (inRush() || pageBusyNow() || idleMs() < 60_000 || handIdleMs() < 60_000) return;   // try again at the next check
+        sleepPending = true;
         main.post(() -> { Host h = host.get(); if (h != null) h.nudgePage(); });   // last push of waiting punches
+        try { Thread.sleep(15_000); } catch (InterruptedException ignored) { }
+        if (!stillGoing(reason)) return;
+        int b = batteryPct();
         reportEvent("deep sleep (" + reason + ") until " + new java.text.SimpleDateFormat("MMM d h:mm a", java.util.Locale.US)
                 .format(new java.util.Date(until)) + (b >= 0 ? ", battery " + b + "%" : ""));
-        try { Thread.sleep(15_000); } catch (InterruptedException ignored) { }
-        if (idleMs() < 15_000 || rawPlugged()) return;   // someone came / power came back meanwhile
         beat();                                          // the office sees it before Wi-Fi goes off
+        if (!stillGoing(reason)) { pendingEvent = null; return; }
+        if ("holiday".equals(reason)) until = prefs.planUntil();   // the beat may have brought a changed plan
         prefs.setSleep(until, reason);
+        prefs.setPlanHandWoken(false);
+        sleepPending = false;
         main.post(() -> { Host h = host.get(); if (h != null) h.setPaused(true); });
-        main.postDelayed(() -> Policy.screenOffNow(ctx), 500);
+        main.postDelayed(() -> { if (prefs.sleeping()) Policy.screenOffNow(ctx); }, 500);
+        prefs.setWifiOffBySleep(true);
         setWifi(false);
         cancelSleepAlarm(11, ScheduleReceiver.ACTION_CHECKIN);
         setSleepAlarm(21, ScheduleReceiver.ACTION_SLEEP_WAKE, until);
         setSleepAlarm(22, ScheduleReceiver.ACTION_SLEEP_REPORT, Math.min(until, System.currentTimeMillis() + SleepRules.REPORT_EVERY_MS));
+    }
+
+    /** Still OK to go to sleep after the wait / the beat? (nobody came, no power, not a rush, plan still on) */
+    private boolean stillGoing(String reason) {
+        if (!sleepPending || idleMs() < 15_000 || handIdleMs() < 15_000 || rawPlugged() || inRush() || pageBusyNow()) {
+            sleepPending = false;
+            return false;
+        }
+        if ("holiday".equals(reason) && !SleepRules.inPlan(System.currentTimeMillis(), prefs.planFrom(), prefs.planUntil())) {
+            sleepPending = false;
+            return false;
+        }
+        return true;
     }
 
     /** Background thread. Wake up: Wi-Fi back, page running, screen on (in its hours), office told. */
@@ -1036,15 +1089,15 @@ final class Core {
         if (!prefs.sleeping()) return;
         String reason = prefs.sleepReason();
         boolean timeUp = "wake time".equals(why);
+        boolean byHand = why.startsWith("screen") || "phone call".equals(why) || "office Screen on".equals(why);
         prefs.setSleep(0, "");
+        prefs.setLastWakeAt(System.currentTimeMillis());
+        if (byHand && "holiday".equals(reason)) prefs.setPlanHandWoken(true);   // stays awake until 2 h untouched
         cancelSleepAlarm(21, ScheduleReceiver.ACTION_SLEEP_WAKE);
         cancelSleepAlarm(22, ScheduleReceiver.ACTION_SLEEP_REPORT);
         setWifi(true);
         main.post(() -> { Host h = host.get(); if (h != null) h.setPaused(false); });
-        if (isOnHours() && !"screen turned on".equals(why) && !"screen touched".equals(why)) {
-            ownScreenOnUntil = System.currentTimeMillis() + 10_000;
-            wakeScreenChecked();
-        }
+        if (isOnHours() && !"screen turned on".equals(why) && !"screen touched".equals(why)) wakeScreenChecked();
         scheduleCheckin();
         scheduleReportAlarm();
         scheduleNextAlarm();
@@ -1082,21 +1135,17 @@ final class Core {
             long woke = prefs.wokeAt();
             prefs.setWokeAt(0);
             if (woke <= 0 || prefs.sleeping()) return;
-            boolean touched = Math.max(prefs.lastTouchWall(), lastTouchSaved) >= woke || idleMs() < System.currentTimeMillis() - woke;
+            boolean touched = Math.max(prefs.lastTouchWall(), lastTouchSaved) >= woke || handIdleMs() < System.currentTimeMillis() - woke;
             if (SleepRules.sleepAgainAt10(rawPlugged(), touched)) enterSleep("power cut", SleepRules.nextWake(System.currentTimeMillis()));
         });
     }
 
     void sleepPlanAlarm() { bg.post(this::checkSleepTriggers); }
 
-    /** After a restart: alarms are gone. Still sleeping -> keep sleeping (or wake if its time passed). */
+    /** After a restart: a deep sleep ends (see start()); the Wi-Fi it turned off comes back. */
     void afterBoot() {
-        if (!prefs.sleeping()) return;
-        if (System.currentTimeMillis() >= prefs.sleepUntil() || rawPlugged()) { bg.post(() -> exitSleep(rawPlugged() ? "power back" : "wake time")); return; }
-        setSleepAlarm(21, ScheduleReceiver.ACTION_SLEEP_WAKE, prefs.sleepUntil());
-        setSleepAlarm(22, ScheduleReceiver.ACTION_SLEEP_REPORT, Math.min(prefs.sleepUntil(), System.currentTimeMillis() + SleepRules.REPORT_EVERY_MS));
-        main.post(() -> { Host h = host.get(); if (h != null) h.setPaused(true); });
-        setWifi(false);
+        if (prefs.sleeping()) bg.post(() -> exitSleep("tablet restarted"));
+        else if (prefs.wifiOffBySleep()) { setWifi(true); prefs.setWifiOffBySleep(false); }
     }
 
     /** The beat answer carries the owner's plan and the generator hours. A cancelled plan wakes a holiday sleep. */
@@ -1126,6 +1175,15 @@ final class Core {
             return f.parse(s).getTime();
         } catch (Exception e) {
             return 0L;
+        }
+    }
+
+    private boolean wifiOn() {
+        try {
+            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) ctx.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            return wm == null || wm.isWifiEnabled();
+        } catch (Exception e) {
+            return true;
         }
     }
 

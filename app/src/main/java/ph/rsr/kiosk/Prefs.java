@@ -80,6 +80,15 @@ final class Prefs {
     /** 7:00 wake from a power-cut sleep (for the 10:00 check), wall clock; 0 = none. */
     long wokeAt() { return sp.getLong("woke_at", 0L); }
     void setWokeAt(long t) { sp.edit().putLong("woke_at", t).commit(); }
+    /** Last wake from a deep sleep (wall clock): generator time is counted from here (review 2026-11-19). */
+    long lastWakeAt() { return sp.getLong("last_wake", 0L); }
+    void setLastWakeAt(long t) { sp.edit().putLong("last_wake", t).apply(); }
+    /** Someone woke the kiosk by hand during a planned holiday: it stays awake until 2 h untouched. */
+    boolean planHandWoken() { return sp.getBoolean("plan_hand", false); }
+    void setPlanHandWoken(boolean b) { sp.edit().putBoolean("plan_hand", b).apply(); }
+    /** The holiday sleep turned the Wi-Fi off (so it must come back on, whatever happens). */
+    boolean wifiOffBySleep() { return sp.getBoolean("wifi_off_sleep", false); }
+    void setWifiOffBySleep(boolean b) { sp.edit().putBoolean("wifi_off_sleep", b).commit(); }
     /** Last touch on the kiosk, wall clock (survives restarts; saved at most once a minute). */
     long lastTouchWall() { return sp.getLong("touch_wall", 0L); }
     void setLastTouchWall(long t) { sp.edit().putLong("touch_wall", t).apply(); }

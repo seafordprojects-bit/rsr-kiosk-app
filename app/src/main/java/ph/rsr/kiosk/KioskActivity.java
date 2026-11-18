@@ -655,7 +655,7 @@ public class KioskActivity extends Activity implements Core.Host {
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
-        Core.get(this).touched();
+        Core.get(this).handTouched();   // a real hand: also wakes a holiday-sleeping kiosk
         lastTouchAt = SystemClock.elapsedRealtime();
         if (backlightLow) setBacklightLow(false);
         if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {

@@ -48,6 +48,10 @@ public class SleepRulesTest {
         ok(!SleepRules.inPlan(now, now - h, now - 2 * h) && !SleepRules.inPlan(now, 0, now + h), "bad plan (end before start / none): awake");
         ok(!SleepRules.inPlan(now, now - h, now + 40L * 24 * h), "plan over 31 days refused");
         ok(SleepRules.windowMinutes(GEN, t("10:00"), 13 * 60) == 120, "13 h back from 10:00 = 2 h of generator time (08-10)");
+        // review 2026-11-19: day 2 of an outage - the app counts generator time only from today 00:00 / the last wake
+        // (span = min(unplugged, minutes since midnight)), so it does NOT sleep at 08:15 before late workers come
+        ok(!SleepRules.saverNow(GEN, true, "06:45", "00:15", t("08:15"), Math.min(2000, t("08:15")), 2000, false), "day 2, 08:15: only 15 generator minutes today: awake");
+        ok(SleepRules.saverNow(GEN, true, "06:45", "00:15", t("10:00"), Math.min(2000, t("10:00")), 2000, false), "day 2, 10:00: 2 generator hours today, untouched: sleep");
         System.out.println(pass + " passed, " + fail + " failed");
         if (fail > 0) System.exit(1);
     }

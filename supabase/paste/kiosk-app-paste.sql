@@ -216,6 +216,7 @@ create table if not exists public.kiosk_app_power_log (
   died_at    timestamptz,
   booted_at  timestamptz
 );
+alter table public.kiosk_app_power_log add column if not exists back_unknown boolean not null default false;
 create index if not exists kiosk_app_power_log_dev on public.kiosk_app_power_log (device_id, off_at desc);
 revoke all on public.kiosk_app_power_log from public, anon, authenticated;
 alter table public.kiosk_app_power_log enable row level security;
@@ -314,7 +315,7 @@ declare
   v_today date := (now() at time zone 'Asia/Manila')::date;
 begin
   if v_id !~ '^app-[A-Za-z0-9]{1,64}$' then return '{}'::jsonb; end if;
-  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try|screen woken by phone call|deep sleep \((power cut|holiday)\) until [A-Z][a-z]{2} [0-9]{1,2} [0-9]{1,2}:[0-9]{2} (AM|PM)(, battery [0-9]{1,3}%)?|woke from deep sleep \((power back|wake time|screen turned on|screen touched|phone call|office Screen on|plan cancelled)\)(, battery [0-9]{1,3}%)?)$' then
+  if v_ev !~ '^(started|setup done|tablet restarted|maintenance opened|maintenance ended \(auto\)|page crashed, rebuilt|page froze, reloaded|reload \(settings\)|full reload \(settings\)|updated to build [0-9]{1,6}|installing build [0-9]{1,6}|update install failed: -?[0-9]{1,3}|screen on failed|screen on needed a second try|screen woken by phone call|deep sleep \((power cut|holiday)\) until [A-Z][a-z]{2} [0-9]{1,2} [0-9]{1,2}:[0-9]{2} (AM|PM)(, battery [0-9]{1,3}%)?|woke from deep sleep \((power back|wake time|screen turned on|screen touched|phone call|office Screen on|plan cancelled|tablet restarted)\)(, battery [0-9]{1,3}%)?)$' then
     v_ev := '';
   end if;
   select k.token, k.token_confirmed into v_tok, v_conf from public.kiosk_app_devices k where k.device_id = v_id;
@@ -624,7 +625,7 @@ begin
            'battery', k.battery, 'charging', k.charging, 'screen_on', k.screen_on,
            'device_owner', k.device_owner, 'maintenance', k.maintenance,
            'page_ok', k.page_ok, 'page_url', k.page_url, 'sched_on', k.sched_on, 'sched_off', k.sched_off,
-           'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes',
+           'last_seen', k.last_seen, 'online', k.last_seen > now() - interval '3 minutes', 'unplugged_since', k.unplugged_since,
            'wifi', k.wifi, 'internet', k.internet, 'wifi_signal', k.wifi_signal,
            'battery_temp', k.battery_temp, 'last_outage', k.last_outage, 'power_windows', k.power_windows,
            'page_version', k.page_version, 'page_error', k.page_error, 'page_error_at', k.page_error_at, 'shot_at', k.shot_at,
@@ -1193,11 +1194,12 @@ begin
     v_kind := e->>'kind';
     v_b := case when e->>'batt' ~ '^[0-9]{1,3}$' and (e->>'batt')::int <= 100 then (e->>'batt')::int end;
     select l.id into v_open from public.kiosk_app_power_log l
-     where l.device_id = p_device and l.on_at is null order by l.off_at desc limit 1;
+     where l.device_id = p_device and l.on_at is null and not l.back_unknown order by l.off_at desc limit 1;
     if v_kind = 'off' then
-      if v_open is null then
-        insert into public.kiosk_app_power_log (device_id, off_at, batt_off) values (p_device, v_at, v_b);
+      if v_open is not null then
+        update public.kiosk_app_power_log l set back_unknown = true where l.id = v_open;
       end if;
+      insert into public.kiosk_app_power_log (device_id, off_at, batt_off) values (p_device, v_at, v_b);
     elsif v_kind = 'on' then
       if v_open is not null then
         update public.kiosk_app_power_log l set on_at = v_at, batt_on = v_b where l.id = v_open;
@@ -1218,13 +1220,15 @@ create or replace function public.kiosk_app_power_info(p_device text)
 returns jsonb language sql stable security definer set search_path = public as $$
   select jsonb_build_object(
     'rows', coalesce((select jsonb_agg(jsonb_build_object('off_at', l.off_at, 'on_at', l.on_at, 'batt_off', l.batt_off,
-                                                          'batt_on', l.batt_on, 'died_at', l.died_at, 'booted_at', l.booted_at)
+                                                          'batt_on', l.batt_on, 'died_at', l.died_at, 'booted_at', l.booted_at,
+                                                          'back_unknown', l.back_unknown)
                                        order by l.off_at desc)
                         from (select * from public.kiosk_app_power_log x where x.device_id = p_device order by x.off_at desc limit 30) l), '[]'::jsonb),
     'cuts_7d', (select count(*) from public.kiosk_app_power_log x where x.device_id = p_device and x.off_at > now() - interval '7 days'),
     'off_min_7d', (select round(coalesce(sum(extract(epoch from least(coalesce(x.on_at, now()), now())
                                   - greatest(x.off_at, now() - interval '7 days')) / 60), 0))
-                     from public.kiosk_app_power_log x where x.device_id = p_device and coalesce(x.on_at, now()) > now() - interval '7 days'))
+                     from public.kiosk_app_power_log x where x.device_id = p_device and not x.back_unknown
+                      and coalesce(x.on_at, now()) > now() - interval '7 days'))
 $$;
 revoke all on function public.kiosk_app_power_info(text) from public, anon, authenticated;
 create or replace function public.kiosk_app_sleep_set(p_passcode text, p_device text, p_from text, p_until text)

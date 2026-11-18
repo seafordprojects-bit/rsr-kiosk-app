@@ -475,8 +475,8 @@ function powerPart(t) {
       const normal = genNormal(t.power_windows, r.off_at, r.on_at);
       const note = r.died_at ? '<br><span class="err">tablet died ' + esc(tm(r.died_at)) + '</span>' : normal ? '<br><span class="mute">generator hours</span>' : '';
       const sameDay = r.on_at && new Date(r.on_at).toDateString() === new Date(r.off_at).toDateString();
-      return `<tr class="${normal ? 'norm' : ''}"><td>${esc(fmt(r.off_at))}${note}</td><td>${r.on_at ? esc(sameDay ? tm(r.on_at) : fmt(r.on_at)) : '<b style="color:var(--warn)">still off</b>'}</td>
-        <td>${esc(mins(dur))}</td><td>${r.batt_off != null ? esc(r.batt_off) + '%' : '?'} &rarr; ${r.batt_on != null ? esc(r.batt_on) + '%' : '-'}</td></tr>`; }).join('')}</tbody></table></div>`
+      return `<tr class="${normal ? 'norm' : ''}"><td>${esc(fmt(r.off_at))}${note}</td><td>${r.on_at ? esc(sameDay ? tm(r.on_at) : fmt(r.on_at)) : r.back_unknown ? '<span class="mute">unknown</span>' : '<b style="color:var(--warn)">still off</b>'}</td>
+        <td>${r.back_unknown ? '-' : esc(mins(dur))}</td><td>${r.batt_off != null ? esc(r.batt_off) + '%' : '?'} &rarr; ${r.batt_on != null ? esc(r.batt_on) + '%' : '-'}</td></tr>`; }).join('')}</tbody></table></div>`
     : '<div class="mute">No power cut recorded yet (needs app build 23 or newer).</div>';
   return `${now}
     <div class="sub2">Holiday sleep</div>

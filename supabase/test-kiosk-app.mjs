@@ -882,12 +882,17 @@ ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`
 await hb({power_events:[{kind:'boot',at:T-10*m},{kind:'on',at:T-5*m,batt:3}]});
 PL=(await q(`select * from kiosk_app_power_log where device_id=$1 order by off_at`,[HS]));
 ok(PL[1].booted_at && PL[1].on_at && PL[1].batt_on===3,'power back: the tablet started again, period closed');
+// a cut whose "power back" was never seen (app not running), then a new cut: the first is closed as "back unknown"
+await hb({power_events:[{kind:'off',at:T-4*m,batt:90}]}); await hb({power_events:[{kind:'off',at:T-2*m,batt:89}]});
+ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1 and back_unknown`,[HS]))[0].n===1
+   && (await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1 and on_at is null and not back_unknown`,[HS]))[0].n===1,'missed "power back": closed as unknown, the new cut opens');
+await q(`delete from kiosk_app_power_log where device_id=$1 and off_at > now() - interval '5 minutes'`,[HS]);
 await hb({power_events:[{kind:'off',at:'abc'},{kind:'zap',at:T},{kind:'off',at:T+86400000}]});
 ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`,[HS]))[0].n===2,'odd power notes ignored');
 await beat({device_id:HS,token:'wrong',battery:80,page_url:MAN,power_events:[{kind:'off',at:T-1*m}]});
 ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`,[HS]))[0].n===2,'power notes with a wrong secret ignored');
 let L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===HS);
-ok(L.power && L.power.rows.length===2 && L.power.cuts_7d===2 && Math.round(L.power.off_min_7d)===175,'Tablets page: 2 cuts this week, 2 h 55 min without power (60 + 115)');
+ok(L.power && L.power.rows.length===2 && L.power.cuts_7d===2 && Math.round(L.power.off_min_7d)===175 && L.unplugged_since!==undefined,'Tablets page: 2 cuts this week, 2 h 55 min without power (60 + 115)');
 // holiday plan
 const ss=async(f,u,pc)=>(await q(`select public.kiosk_app_sleep_set($1,$2,$3,$4) r`,[pc||'123456',HS,f,u]))[0].r;
 ok((await ss('2026-12-24 18:00','2026-12-28 07:00','000000')).error==='wrong passcode','holiday plan: wrong passcode refused');
@@ -914,6 +919,8 @@ await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick
 ok(await sentN('Holiday Kiosk is in deep sleep but MISSED its 12-hour report')===1,'missed 12-hour report: alert once');
 await hb({event:'woke from deep sleep (wake time), battery 64%'});
 ok(await sentN('Holiday Kiosk - woke from deep sleep (wake time), battery 64%. Ready for punches.')===1 && !(await D()).deep_sleep_until,'woke: Telegram at once, sleep state cleared');
+await hb({event:'woke from deep sleep (tablet restarted), battery 50%'});
+ok(await sentN('woke from deep sleep (tablet restarted)')===1,'restart during sleep: woke message');
 await hb({event:'deep sleep (party) until Dec 28 7:00 AM'});
 ok(await sentN('party')===0,'unknown sleep text never reaches Telegram');
 ok((await ss('','')).ok===true && !(await D()).sleep_from,'holiday plan cancelled');
