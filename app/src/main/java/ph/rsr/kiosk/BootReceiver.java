@@ -14,6 +14,7 @@ public class BootReceiver extends BroadcastReceiver {
             core.reportEvent("updated to build " + Updater.currentVersion(c));
         } else {
             core.reportEvent("tablet restarted");
+            PowerLog.add(c, "boot", -1);   // power log: the tablet started again (after a restart or an empty battery)
             // A restart always ends maintenance: the tablet comes back locked.
             new Prefs(c).setMaintenanceUntil(0);
             core.applyAwake();   // the app may have started first and taken the maintenance screen lock
@@ -23,6 +24,7 @@ public class BootReceiver extends BroadcastReceiver {
         core.scheduleNextAlarm();
         core.scheduleReportAlarm();
         core.scheduleUpdateAlarm();
+        core.afterBoot();   // holiday sleep: keep sleeping if it was (its alarms are gone after a restart)
         core.bringToFront();
     }
 }

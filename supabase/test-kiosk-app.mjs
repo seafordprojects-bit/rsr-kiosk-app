@@ -1,4 +1,4 @@
-const PUBLIC_CHECK = "select t as table_name,\n       has_table_privilege('anon', 'public.' || t, 'select') as public_can_read,\n       has_table_privilege('authenticated', 'public.' || t, 'select') as signed_in_can_read\n  from unnest(array['kiosk_app_devices','kiosk_app_events','kiosk_app_shots','kiosk_app_conn','kiosk_app_data_days',\n                    'kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots','kiosk_app_modem','kiosk_app_modem_reads']) t;\n";
+const PUBLIC_CHECK = "select t as table_name,\n       has_table_privilege('anon', 'public.' || t, 'select') as public_can_read,\n       has_table_privilege('authenticated', 'public.' || t, 'select') as signed_in_can_read\n  from unnest(array['kiosk_app_devices','kiosk_app_events','kiosk_app_shots','kiosk_app_conn','kiosk_app_data_days',\n                    'kiosk_app_sms','kiosk_app_loads','kiosk_app_load_shots','kiosk_app_modem','kiosk_app_modem_reads','kiosk_app_power_log']) t;\n";
 // SQL test for kiosk-app.sql on a throwaway local Postgres (npm i embedded-postgres pg; run as a non-root user from this folder).
 import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
@@ -49,10 +49,10 @@ r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(r.cmd==='r
 await q(`select public.kiosk_app_ack('app-abc123','wrong-token',$1,'fake')`,[r.cmd_id]);
 ok(JSON.stringify(await beat({device_id:'app-abc123',charging:true,battery:80})).includes('restart'),'ack with wrong token ignored');
 await q(`select public.kiosk_app_ack('app-abc123',$1,$2,'restarting')`,[TOK['app-abc123'],r.cmd_id]);
-r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(JSON.stringify(r)==='{}','after ack no command');
+r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(!r.cmd && !r.cmd_id,'after ack no command');
 // stale command expires
 await q(`select public.kiosk_app_command('123456','app-abc123','reload','')`); await q(`update kiosk_app_devices set cmd_at=now()-interval '31 minutes'`);
-r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(JSON.stringify(r)==='{}','30-min old command expires');
+r = await beat({device_id:'app-abc123',charging:true,battery:80}); ok(!r.cmd && !r.cmd_id,'30-min old command expires');
 // list
 let L = (await q(`select public.kiosk_app_list('123456') r`))[0].r; ok(Array.isArray(L)&&L.length===1&&L[0].online===true&&L[0].events.length>=1,'list works with events');
 ok((await q(`select public.kiosk_app_list('1') r`))[0].r.error==='wrong passcode','list wrong passcode');
@@ -427,10 +427,12 @@ ok((await q(`select count(*)::int n from kiosk_app_conn where device_id=$1`,[B6]
 await q(`update kiosk_app_devices set net_since=now()-interval '35 minutes' where device_id=$1`,[B6]);
 await q(`update kiosk_app_conn set started_at=now()-interval '35 minutes' where device_id=$1`,[B6]);
 await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
-ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is on MOBILE DATA for 35 min%'`))[0].n===1,'on mobile data 30+ min: one alert');
+// mobile-data alerts only 6 AM - 10 PM Manila: before / after that the test expects none (it ran at 5:27 AM once)
+const WK=(await q(`select extract(hour from now() at time zone 'Asia/Manila')::int h`))[0].h, IN_WORK = WK>=6 && WK<22;
+ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is on MOBILE DATA for 35 min%'`))[0].n===(IN_WORK?1:0),'on mobile data 30+ min: one alert (6 AM - 10 PM)');
 await beat({device_id:B6,battery:90,charging:true,page_url:MAN,net_type:'wifi'});
 await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
-ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is back on Wi-Fi. It was on mobile data 35 min%'`))[0].n===1,'back on Wi-Fi: one message with how long');
+ok((await q(`select count(*)::int n from sent where msg like '%Mandaue Kiosk is back on Wi-Fi. It was on mobile data 35 min%'`))[0].n===(IN_WORK?1:0),'back on Wi-Fi: one message with how long');
 LB=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===B6);
 ok(LB.net.down_7d_min>=34 && LB.net.down_7d_min<=36 && LB.net.periods[0].kind==='mobile' && LB.net.periods[0].to,'downtime 7 days counts the closed period');
 // outage reported by the tablet when it is back -> closed offline period
@@ -862,9 +864,66 @@ await bb({batt_health:'<script>'}); ok((await D()).batt_health==='good','unknown
 await q(`delete from kiosk_app_devices where device_id=$1`,[BW]); await q(`delete from sent`);
 }
 
+// ---- holiday sleep + power log (owner 2026-11-19) ----
+{
+const HS='app-hstab', MAN='https://seafordprojects-bit.github.io/rsr-engineering/kiosk/?site=Carmen';
+const hb=(x)=>beat(Object.assign({device_id:HS,battery:80,charging:false,page_url:MAN},x||{}));
+let r0=await hb({name:'Holiday Kiosk'}); await hb();
+const D=async()=>(await q(`select * from kiosk_app_devices where device_id=$1`,[HS]))[0];
+const sentN=async(s)=>(await q(`select msg from sent where msg like $1`,['%'+s+'%'])).length;
+await q(`delete from sent`);
+// power log: the tablet's notes (taken even offline) become periods
+const T=Date.now(), m=60000;
+await hb({power_events:[{kind:'off',at:T-300*m,batt:92},{kind:'on',at:T-240*m,batt:85},{kind:'off',at:T-120*m,batt:88},{kind:'shutdown',at:T-30*m,batt:2}]});
+let PL=(await q(`select * from kiosk_app_power_log where device_id=$1 order by off_at`,[HS]));
+ok(PL.length===2 && PL[0].on_at && PL[0].batt_off===92 && PL[0].batt_on===85 && !PL[1].on_at && PL[1].died_at,'power log: cut 1 h (back), cut still going and the tablet DIED (battery empty)');
+await hb({power_events:[{kind:'off',at:T-300*m,batt:92},{kind:'on',at:T-240*m,batt:85}]});
+ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`,[HS]))[0].n===2,'resent notes are not taken twice');
+await hb({power_events:[{kind:'boot',at:T-10*m},{kind:'on',at:T-5*m,batt:3}]});
+PL=(await q(`select * from kiosk_app_power_log where device_id=$1 order by off_at`,[HS]));
+ok(PL[1].booted_at && PL[1].on_at && PL[1].batt_on===3,'power back: the tablet started again, period closed');
+await hb({power_events:[{kind:'off',at:'abc'},{kind:'zap',at:T},{kind:'off',at:T+86400000}]});
+ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`,[HS]))[0].n===2,'odd power notes ignored');
+await beat({device_id:HS,token:'wrong',battery:80,page_url:MAN,power_events:[{kind:'off',at:T-1*m}]});
+ok((await q(`select count(*)::int n from kiosk_app_power_log where device_id=$1`,[HS]))[0].n===2,'power notes with a wrong secret ignored');
+let L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===HS);
+ok(L.power && L.power.rows.length===2 && L.power.cuts_7d===2 && Math.round(L.power.off_min_7d)===175,'Tablets page: 2 cuts this week, 2 h 55 min without power (60 + 115)');
+// holiday plan
+const ss=async(f,u,pc)=>(await q(`select public.kiosk_app_sleep_set($1,$2,$3,$4) r`,[pc||'123456',HS,f,u]))[0].r;
+ok((await ss('2026-12-24 18:00','2026-12-28 07:00','000000')).error==='wrong passcode','holiday plan: wrong passcode refused');
+ok((await ss('24/12/2026','x')).error && (await ss('2020-01-01 18:00','2020-01-02 07:00')).error,'holiday plan: bad / past dates refused');
+const fut=(await q(`select to_char((now() at time zone 'Asia/Manila') + interval '2 days','YYYY-MM-DD') a, to_char((now() at time zone 'Asia/Manila') + interval '6 days','YYYY-MM-DD') b, to_char((now() at time zone 'Asia/Manila') + interval '40 days','YYYY-MM-DD') c`))[0];
+ok((await ss(fut.b+' 07:00', fut.a+' 18:00')).error==='wake-up must be after the start' && (await ss(fut.a+' 18:00', fut.c+' 07:00')).error==='at most 31 days','holiday plan: end before start / over 31 days refused');
+ok((await ss(fut.a+' 18:00', fut.b+' 07:00')).ok===true,'holiday plan saved');
+let R=await hb();
+ok(R.sleep_from && R.sleep_until && /T10:00:00Z$/.test(R.sleep_from) && /T23:00:00Z$/.test(R.sleep_until) && R.power_windows==='','tablet gets the plan (6 PM / 7 AM Manila) and its generator hours with every report');
+await q(`update kiosk_app_devices set power_windows='08:00-11:30,13:00-16:30,18:00-21:00+24:00' where device_id=$1`,[HS]);
+R=await hb(); ok(R.power_windows==='08:00-11:30,13:00-16:30,18:00-21:00+24:00','generator hours reach the tablet');
+ok(!(await beat({device_id:HS,token:'wrong',battery:80,page_url:MAN})).sleep_from,'plan not given to a wrong secret');
+// deep sleep: Telegram at once, no OFFLINE while sleeping, missed 12-hour report alert
+await q(`delete from sent`);
+await hb({event:'deep sleep (holiday) until Dec 28 7:00 AM, battery 81%', deep_sleep:{reason:'holiday',until:new Date(Date.now()+80*3600e3).toISOString().replace(/\.\d+Z$/,'Z')}});
+ok(await sentN('Holiday Kiosk - DEEP SLEEP (holiday) until Dec 28 7:00 AM, battery 81%. Screen and Wi-Fi off')===1,'going to deep sleep: Telegram at once');
+L=(await q(`select public.kiosk_app_list('123456') r`))[0].r.find(x=>x.device_id===HS);
+ok(L.deep_sleep_until && L.deep_sleep_reason==='holiday' && L.asleep===true,'Tablets page: in deep sleep');
+await q(`update kiosk_app_devices set last_seen=now()-interval '3 hours', screen_on=true, sched_on='', sched_off='' where device_id=$1`,[HS]);
+await q(`delete from sent`); await q(`select public.kiosk_app_tick()`);
+ok(await sentN('Holiday Kiosk is OFFLINE')===0,'deep sleep: silence is not OFFLINE');
+await q(`update kiosk_app_devices set last_seen=now()-interval '14 hours' where device_id=$1`,[HS]);
+await q(`select public.kiosk_app_tick()`); await q(`select public.kiosk_app_tick()`);
+ok(await sentN('Holiday Kiosk is in deep sleep but MISSED its 12-hour report')===1,'missed 12-hour report: alert once');
+await hb({event:'woke from deep sleep (wake time), battery 64%'});
+ok(await sentN('Holiday Kiosk - woke from deep sleep (wake time), battery 64%. Ready for punches.')===1 && !(await D()).deep_sleep_until,'woke: Telegram at once, sleep state cleared');
+await hb({event:'deep sleep (party) until Dec 28 7:00 AM'});
+ok(await sentN('party')===0,'unknown sleep text never reaches Telegram');
+ok((await ss('','')).ok===true && !(await D()).sleep_from,'holiday plan cancelled');
+R=await hb(); ok(R.sleep_from==='' && R.sleep_until==='','tablet told: no plan');
+await q(`delete from kiosk_app_power_log where device_id=$1`,[HS]); await q(`delete from kiosk_app_devices where device_id=$1`,[HS]); await q(`delete from sent`);
+}
+
 // anon cannot read tables
 // the owner's go-live check (supabase/paste/build7-public-check.sql): every table "public can read = false"
-{ const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===10 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 10 tables'); }
+{ const chk=(await c.query(PUBLIC_CHECK)).rows; ok(chk.length===11 && chk.every(r=>r.public_can_read===false && r.signed_in_can_read===false),'go-live check: public / signed-in can read = false on all 11 tables'); }
 await c.query(`grant usage on schema public to anon`);
 await c.query(`set role anon`); let denied=false; try{ await c.query(`select * from kiosk_app_devices`);}catch(e){denied=true;}
 ok(denied,'anon cannot read table directly'); let tickDenied=false; try{ await c.query(`select public.kiosk_app_tick()`);}catch(e){tickDenied=true;} ok(tickDenied,'anon cannot run tick');
@@ -880,11 +939,12 @@ for (const f of [`kiosk_app_sim_info('x')`,`kiosk_app_down_min('x', now())`,`kio
 }
 { const r=(await c.query(`select public.kiosk_app_load_shot_get('000000','x') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no load screenshot'); }
 // build-7 data exposure: the public key reads no modem table or helper; the office RPC needs the passcode
-for (const t of ['kiosk_app_modem','kiosk_app_modem_reads']) { let d=false; try{ await c.query(`select * from ${t}`);}catch(e){d=true;} ok(d,'public key cannot read '+t); }
-for (const f of [`kiosk_app_modem_put('x','{}')`,`kiosk_app_modem_info('x')`,`kiosk_app_modem_msg('x','weekly')`,`kiosk_app_modem_parts('x', current_date)`,`kiosk_app_modem_cum_at('x', now())`]) {
+for (const t of ['kiosk_app_modem','kiosk_app_modem_reads','kiosk_app_power_log']) { let d=false; try{ await c.query(`select * from ${t}`);}catch(e){d=true;} ok(d,'public key cannot read '+t); }
+for (const f of [`kiosk_app_modem_put('x','{}')`,`kiosk_app_modem_info('x')`,`kiosk_app_modem_msg('x','weekly')`,`kiosk_app_modem_parts('x', current_date)`,`kiosk_app_modem_cum_at('x', now())`,`kiosk_app_power_put('x','[]')`,`kiosk_app_power_info('x')`]) {
   let d=false; try{ await c.query(`select public.${f}`);}catch(e){d=true;} ok(d,'public key cannot run '+f.split('(')[0]);
 }
 { const r=(await c.query(`select public.kiosk_app_modem_set('000000','x','{"add_gb":"16"}') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no yard load change'); }
+{ const r=(await c.query(`select public.kiosk_app_sleep_set('000000','x','','') r`)).rows[0].r; ok(r.error==='wrong passcode','public key + wrong passcode: no holiday plan change'); }
 await c.query(`reset role`);
 // rollback
 await c.query(fs.readFileSync('./kiosk-app-rollback.sql','utf8'));

@@ -576,7 +576,10 @@ public class KioskActivity extends Activity implements Core.Host {
         if (phone) Policy.applyPhoneScreenTimeout(this);
         hideBars();
         if (!prefs.inMaintenance()) startLock();
-        if (web != null) web.onResume();
+        if (web != null) {
+            web.onResume();
+            if (!prefs.sleeping()) web.resumeTimers();   // holiday sleep ended (or never was): page timers run
+        }
     }
 
     @Override
@@ -780,6 +783,19 @@ public class KioskActivity extends Activity implements Core.Host {
 
     /** Build-6 second wake path: the kiosk window itself asks Android to turn the screen on (works where a
      *  wake lock alone is ignored). Keyguard is off by policy; asked to dismiss anyway (harmless). */
+    /** Holiday sleep (owner 2026-11-19): stop the page's timers (sync, clock, its heartbeat) so the CPU can rest for
+     *  days; run them again on wake. Punches waiting on the tablet stay saved and sync after the wake. */
+    @Override
+    public void setPaused(boolean paused) {
+        try {
+            if (web == null) return;
+            if (paused) { web.onPause(); web.pauseTimers(); }
+            else { web.resumeTimers(); web.onResume(); nudgePage(); }
+        } catch (Exception e) {
+            Log.w(TAG, "pause page", e);
+        }
+    }
+
     @Override
     public void turnScreenOnNow() {
         if (Build.VERSION.SDK_INT < 27) return;   // Android 8.0: only the wake lock path

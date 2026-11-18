@@ -61,6 +61,29 @@ final class Prefs {
     long lastUpdateCheck() { return sp.getLong("upd_check", 0L); }
     void setLastUpdateCheck(long t) { sp.edit().putLong("upd_check", t).apply(); }
 
+    // ---- holiday sleep / power-cut saver (owner 2026-11-19) ----
+    long sleepUntil() { return sp.getLong("sleep_until", 0L); }
+    String sleepReason() { return sp.getString("sleep_reason", ""); }
+    long sleepSince() { return sp.getLong("sleep_since", 0L); }
+    boolean sleeping() { return sleepUntil() > 0; }
+    void setSleep(long until, String reason) {
+        sp.edit().putLong("sleep_until", until).putString("sleep_reason", reason)
+                .putLong("sleep_since", until > 0 ? System.currentTimeMillis() : 0L).commit();
+    }
+    /** Owner's planned holiday sleep, from the server (0 = none). */
+    long planFrom() { return sp.getLong("plan_from", 0L); }
+    long planUntil() { return sp.getLong("plan_until", 0L); }
+    void setPlan(long from, long until) { sp.edit().putLong("plan_from", from).putLong("plan_until", until).commit(); }
+    /** Generator hours from the Tablets page ("" = grid power). */
+    String powerWindows() { return sp.getString("power_windows", ""); }
+    void setPowerWindows(String w) { sp.edit().putString("power_windows", w).apply(); }
+    /** 7:00 wake from a power-cut sleep (for the 10:00 check), wall clock; 0 = none. */
+    long wokeAt() { return sp.getLong("woke_at", 0L); }
+    void setWokeAt(long t) { sp.edit().putLong("woke_at", t).commit(); }
+    /** Last touch on the kiosk, wall clock (survives restarts; saved at most once a minute). */
+    long lastTouchWall() { return sp.getLong("touch_wall", 0L); }
+    void setLastTouchWall(long t) { sp.edit().putLong("touch_wall", t).apply(); }
+
     String lastBeatStatus() { return sp.getString("beat_status", "not yet"); }
     void setLastBeatStatus(String s) { sp.edit().putString("beat_status", s).apply(); }
 

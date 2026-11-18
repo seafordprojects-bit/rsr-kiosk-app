@@ -14,7 +14,12 @@ const { chromium } = require('playwright');
       closes_on: '2027-11-01', texts: [{ from: 'GOMO', body: 'Your data is running low <script>x</script>', at: iso(36e5), kind: 'low' }] } };
   const phone = { device_id: 'app-2', name: 'Carmen roll-call phone', phone: true, page_url: 'https://seafordprojects-bit.github.io/rsr-engineering/monitoring/roll-call.html', online: false, last_seen: iso(36e5), battery: 60, charging: false, events: [],
     device_owner: false, battery_unrestricted: false, net: { type: 'mobile', mobile_ok: false }, sim: { provider: 'SMART', load: { expires_on: '2026-11-01', days_left: -1 } }, modem: { load_gb: 16, left_gb: 2 } };
-  const carmen = { device_id: 'app-3', name: 'Carmen Kiosk', online: true, last_seen: iso(1e4), battery: 70, charging: true, events: [], net: { type: 'wifi', down_today_min: 0, down_7d_min: 0, periods: [] }, punches: null, sim: { provider: 'DITO', state: 'ready', sms_ok: true, texts: [], load: null },
+  const carmen = { device_id: 'app-3', name: 'Carmen Kiosk', online: true, last_seen: iso(1e4), battery: 70, charging: true, events: [],
+    power_windows: '08:00-11:30,13:00-16:30,18:00-21:00+24:00', sleep_from: new Date(Date.now() + 864e5).toISOString(), sleep_until: new Date(Date.now() + 4 * 864e5).toISOString(),
+    power: { cuts_7d: 3, off_min_7d: 905, rows: [
+      { off_at: '2026-11-18T13:00:00Z', on_at: '2026-11-19T00:00:00Z', batt_off: 98, batt_on: 61 },
+      { off_at: '2026-11-17T02:15:00Z', on_at: '2026-11-17T04:10:00Z', batt_off: 90, batt_on: 72 },
+      { off_at: '2026-11-15T13:05:00Z', on_at: null, batt_off: 95, died_at: '2026-11-17T10:00:00Z' } ] }, net: { type: 'wifi', down_today_min: 0, down_7d_min: 0, periods: [] }, punches: null, sim: { provider: 'DITO', state: 'ready', sms_ok: true, texts: [], load: null },
     modem: { host: '192.168.1.1', last_read_at: iso(5 * 6e4), inbox: 13, restarts: 1, used_today_gb: 0.35, used_7d_gb: 1.2, load_gb: 16, load_date: '2026-11-17',
       used_since_load_gb: 6.01, left_gb: 9.99, gb_per_day: 0.8, days_to_empty: 12, alerted_gb: 10, mode: 'test', test_day: 3, test_days: 14 } };
   let saved = null, modemSaved = null;
@@ -54,7 +59,7 @@ const { chromium } = require('playwright');
   early.xCloses = (await p.$$(C1 + ' .panel')).length === 0;
   // read every part's text: open each part on every card in turn (as the owner would tap them)
   const all = await p.evaluate(() => { let html = '', text = ''; const cnt = {};
-    for (const t of lastRows) for (const sec of ['battery','punches','net','sim','modem','details','settings','fix','events']) {
+    for (const t of lastRows) for (const sec of ['battery','power','punches','net','sim','modem','details','settings','fix','events']) {
       sel[t.device_id] = sec; render(lastRows);
       const pn = document.getElementById('pnl-' + t.device_id); if (!pn) continue;
       html += pn.innerHTML; text += pn.textContent;
@@ -76,7 +81,10 @@ const { chromium } = require('playwright');
     modemNotRead: txt.includes('Not read yet. The tablet reads the PLDT modem'),
     modemBtns: all.cnt.read_modem === 2, retryBtn: all.cnt.retry_punches === 1, wifiBtn: all.cnt.set_wifi === 3,
     restartBtns: all.cnt.restart === 3,
-    batteryPart: txt.includes('BATTERY LIFE') && txt.includes('Still measuring') };
+    batteryPart: txt.includes('BATTERY LIFE') && txt.includes('Still measuring'),
+    powerPart: txt.includes('Holiday sleep planned:') && txt.includes('Power log') && txt.includes('3 cuts, 15 h 5 min without power')
+      && txt.includes('generator hours') && txt.includes('tablet died') && txt.includes('still off') && txt.includes('1 h 55 min'),
+    planBtn: all.html.includes('Plan holiday sleep') && all.html.includes('Cancel plan') };
   Object.assign(checks, early);
   await p.screenshot({ path: require('os').tmpdir() + '/tab1.png', fullPage: true });
   // record a yard load (prompts)
@@ -86,6 +94,14 @@ const { chromium } = require('playwright');
   checks.modemSaved = !!modemSaved && modemSaved.p_device === 'app-3' && modemSaved.p.add_gb === '16' && modemSaved.p.load_date === '2026-11-17';
   p.removeAllListeners('dialog');
   // open record load, no reader (CDN blocked): file -> proof kept, typed details saved
+  // plan a holiday sleep on Carmen (prompts)
+  await p.click('#list > :nth-child(3 of .card) .tile:has-text("Power")'); await p.waitForTimeout(200);
+  let sleepSaved = null;
+  await p.route('**/rpc/kiosk_app_sleep_set', r => { sleepSaved = JSON.parse(r.request().postData()); r.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' }); });
+  const ans2 = ['2026-12-24 18:00', '2026-12-28 07:00']; p.on('dialog', d => d.accept(ans2.shift()));
+  await p.click('#list > :nth-child(3 of .card) button:has-text("Plan holiday sleep")'); await p.waitForTimeout(400);
+  checks.sleepSaved = !!sleepSaved && sleepSaved.p_device === 'app-3' && sleepSaved.p_from === '2026-12-24 18:00' && sleepSaved.p_until === '2026-12-28 07:00';
+  p.removeAllListeners('dialog');
   // the owner opens SIM on Mandaue (it stays open across refreshes), then Record load
   await p.click('#list > :nth-child(1 of .card) .tile:has-text("SIM GOMO")'); await p.waitForTimeout(100);
   checks.partOpens = await p.isVisible('#list > :nth-child(1 of .card) button.primary:has-text("Record load")');

@@ -58,6 +58,12 @@
   .bar span{display:block;height:100%;border-radius:99px}
   @media (prefers-color-scheme:dark){.tile.on,.chip.on{border-color:#8fb8e8;box-shadow:inset 0 -3px 0 #8fb8e8}.panel{border-color:#3b5b85}}
   .panel .btns{margin-top:10px}
+  .sub2{font-weight:700;margin:14px 0 4px;font-size:15px}
+  .ptable{overflow-x:auto;margin-top:4px}
+  .ptable table{width:100%;border-collapse:collapse;font-size:13px}
+  .ptable th{text-align:left;color:var(--mute);font-weight:600;border-bottom:1px solid var(--line);padding:4px 6px 4px 0}
+  .ptable td{border-bottom:1px solid var(--line);padding:5px 6px 5px 0;vertical-align:top}
+  .ptable tr.norm td{color:var(--mute)}
   .danger-zone{border:1px solid color-mix(in srgb,var(--bad) 40%,transparent);border-radius:12px;padding:10px;margin-top:10px}
   .danger-zone p{margin:0 0 8px;font-size:13px;color:var(--mute)}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
@@ -149,7 +155,7 @@
 <div id="shot" onclick="closeShot()"><img id="shotImg" alt="Kiosk screenshot"><p id="shotCap"></p><button onclick="closeShot()">Close</button></div>
 <script src="load-reader.js?v=2026-11-16a"></script>
 <script>
-const PAGE_VERSION = 'v2026-11-18b';
+const PAGE_VERSION = 'v2026-11-19a';
 const SB = 'https://wpmcbjrisuyjvobvzaus.supabase.co';
 const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndwbWNianJpc3V5anZvYnZ6YXVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NjU3ODQsImV4cCI6MjA5MzQ0MTc4NH0.EGyUnXmVkUrsEteKICMRSOXURxYXPOaKUs8EYCpw6_0';
 let passcode = '';          // kept in memory only, never saved
@@ -288,7 +294,7 @@ function issues(t) {
   if (!t.online && !t.asleep && !phone) add('bad', 'OFFLINE - no report for ' + ago(t.last_seen).replace(' ago', ''), 'details');
   if (t.page_ok === false) add('bad', 'Kiosk page not loading', 'fix');
   if (t.battery != null && t.battery <= 20 && !t.charging) add('bad', 'Battery low: ' + t.battery + '% and not charging', 'battery');
-  else if (t.charging === false && !phone && !t.power_windows) add('warn', 'Not charging', 'battery');
+  else if (t.charging === false && !phone && !t.power_windows) add('warn', 'Not charging (no power?)', 'power');
   if (t.battery_temp >= 45) add('bad', 'Battery hot: ' + t.battery_temp + ' °C', 'battery');
   else if (t.battery_temp >= 40) add('warn', 'Battery warm: ' + t.battery_temp + ' °C', 'battery');
   // battery wear (owner 2026-11-18): replace before it fails
@@ -350,8 +356,9 @@ function render(rows) {
 function cardHtml(t, iss) {
   const phone = isPhone(t), id = esc(t.device_id), dev = t.device_id;
   const worst = iss.some(x => x.lvl === 'bad') ? 'bad' : iss.length ? 'warn' : 'ok';
-  const color = t.online ? 'var(--ok)' : (t.asleep || phone) ? 'var(--mute)' : 'var(--bad)';
-  const state = t.online ? 'Online' : phone ? 'Not on Wi-Fi (normal in the yard)' : t.asleep ? 'Asleep (screen schedule)' : 'OFFLINE';
+  const color = t.deep_sleep_until ? '#5b6bd6' : t.online ? 'var(--ok)' : (t.asleep || phone) ? 'var(--mute)' : 'var(--bad)';
+  const state = t.deep_sleep_until ? 'Deep sleep until ' + hhmm(t.deep_sleep_until) + ' (' + esc(t.deep_sleep_reason || '') + ')'
+              : t.online ? 'Online' : phone ? 'Not on Wi-Fi (normal in the yard)' : t.asleep ? 'Asleep (screen schedule)' : 'OFFLINE';
   const pill = worst === 'ok' ? '<span class="pill ok">All good</span>'
              : `<span class="pill ${worst}">${iss.length} to check</span>`;
   const attn = iss.length ? `<ul class="attn ${worst}">${iss.map(x => `<li class="${x.lvl === 'warn' ? 'w' : ''}">${esc(x.txt)}</li>`).join('')}</ul>` : '';
@@ -365,6 +372,7 @@ function cardHtml(t, iss) {
     P.sim = { title: 'SIM - ' + esc(s.provider || s.operator || 'load'), body: simPart(t).body };
     P.modem = { title: 'Yard WiFi load', body: modemPart(t).body };
   }
+  if (!phone) P.power = { title: 'Power &amp; holiday sleep', body: powerPart(t) };
   P.details = { title: 'Tablet details', body: detailsPart(t, phone).body };
   P.settings = { title: 'Settings', body: `
       <dl class="kv"><dt>Screen schedule</dt><dd>${t.sched_on ? esc(t.sched_on) + ' to ' + esc(t.sched_off) : 'always on'}</dd>
@@ -398,7 +406,7 @@ function cardHtml(t, iss) {
   const tile = (sec, label, val, cls) => `<button class="tile ${cls || ''}${open === sec ? ' on' : ''}" aria-expanded="${open === sec}" onclick="openPart('${id}','${sec}')"><small>${label}</small><span>${val}</span></button>`;
   const life = t.batt_wear_pct != null ? '<em>battery life ' + esc(t.batt_wear_pct) + '%</em>' : '';
   const tiles = [tile('battery', 'Battery', esc(batt) + life, lvlOf(iss, 'battery')),
-                 tile('settings', 'Screen', t.screen_on ? 'On' : 'Off', '')];
+                 phone ? tile('settings', 'Screen', t.screen_on ? 'On' : 'Off', '') : tile('power', 'Power', powerTileText(t), lvlOf(iss, 'power'))];
   if (!phone) {
     const q = p ? (+p.queue || 0) + (+p.offline_queue || 0) : 0;
     tiles.push(tile('punches', 'Punches', !p ? '-' : +p.stuck ? p.stuck + ' stuck' : q ? q + ' waiting' : 'All synced ✓', lvlOf(iss, 'punches')));
@@ -433,6 +441,72 @@ function cardHtml(t, iss) {
     ${panel}
     ${quick}
   </div>`;
+}
+
+// ---- owner 2026-11-19: power log + holiday sleep -------------------------------------------------------------
+function powerTileText(t) {
+  if (t.deep_sleep_until) return 'Deep sleep \u{1F4A4}';
+  if (t.charging) return 'On';
+  const since = t.unplugged_since ? Math.round((Date.now() - new Date(t.unplugged_since)) / 60000) : null;
+  return (t.power_windows ? 'Generator off' : 'NO POWER') + (since != null ? ' ' + mins(since) : '');
+}
+// a cut that matches the generator hours (off at a window end, back at a window start, +-20 min) is normal
+function genNormal(windows, offIso, onIso) {
+  if (!windows || !offIso) return false;
+  const mm = iso => { const d = new Date(iso); const p = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Manila', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d).split(':'); return +p[0] * 60 + +p[1]; };
+  const wins = windows.split(',').map(w => w.trim().replace(/\+.*$/, '').split('-').map(x => { const q = x.split(':'); return +q[0] * 60 + +q[1]; })).filter(w => w.length === 2 && !isNaN(w[0]) && !isNaN(w[1]));
+  const near = (a, b) => Math.min(Math.abs(a - b), 1440 - Math.abs(a - b)) <= 20;
+  const offOk = wins.some(w => near(mm(offIso), w[1])) || (/\+24:00/.test(windows) && near(mm(offIso), 0));
+  const onOk = !onIso || wins.some(w => near(mm(onIso), w[0]));
+  return offOk && onOk;
+}
+function powerPart(t) {
+  const id = esc(t.device_id), pw = t.power || { rows: [] }, rows = pw.rows || [];
+  const fmt = iso => iso ? new Date(iso).toLocaleString('en-PH', { timeZone: 'Asia/Manila', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const tm = iso => iso ? new Date(iso).toLocaleTimeString('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' }) : '';
+  const now = t.deep_sleep_until ? `<div class="warnbox" style="border-color:#5b6bd6">\u{1F4A4} <b>Deep sleep</b> (${esc(t.deep_sleep_reason || '')}) until <b>${esc(fmt(t.deep_sleep_until))}</b>. Screen and Wi-Fi off; it reports every 12 hours. Any touch, the power button, a call or the charger wakes it.</div>`
+    : t.charging ? '<div>Power now: <b>on</b> (charging)</div>'
+    : `<div>Power now: <b style="color:var(--warn)">${t.power_windows ? 'generator off' : 'NO POWER'}</b>${t.unplugged_since ? ' since ' + esc(fmt(t.unplugged_since)) : ''} - battery ${esc(t.battery == null ? '?' : t.battery)}%</div>`;
+  const plan = t.sleep_until && new Date(t.sleep_until) > new Date()
+    ? `<div>Holiday sleep planned: <b>${esc(fmt(t.sleep_from))}</b> to <b>${esc(fmt(t.sleep_until))}</b></div>`
+    : '<div class="mute">No holiday sleep planned.</div>';
+  const table = rows.length ? `<div class="ptable"><table><thead><tr><th>Power cut</th><th>Back</th><th>Off for</th><th>Battery</th></tr></thead><tbody>${rows.map(r => {
+      const dur = Math.round(((r.on_at ? new Date(r.on_at) : new Date()) - new Date(r.off_at)) / 60000);
+      const normal = genNormal(t.power_windows, r.off_at, r.on_at);
+      const note = r.died_at ? '<br><span class="err">tablet died ' + esc(tm(r.died_at)) + '</span>' : normal ? '<br><span class="mute">generator hours</span>' : '';
+      const sameDay = r.on_at && new Date(r.on_at).toDateString() === new Date(r.off_at).toDateString();
+      return `<tr class="${normal ? 'norm' : ''}"><td>${esc(fmt(r.off_at))}${note}</td><td>${r.on_at ? esc(sameDay ? tm(r.on_at) : fmt(r.on_at)) : '<b style="color:var(--warn)">still off</b>'}</td>
+        <td>${esc(mins(dur))}</td><td>${r.batt_off != null ? esc(r.batt_off) + '%' : '?'} &rarr; ${r.batt_on != null ? esc(r.batt_on) + '%' : '-'}</td></tr>`; }).join('')}</tbody></table></div>`
+    : '<div class="mute">No power cut recorded yet (needs app build 23 or newer).</div>';
+  return `${now}
+    <div class="sub2">Holiday sleep</div>
+    ${plan}
+    <div class="mute">No-power saver (automatic): ${t.power_windows ? 'if the generator does not run for 2 hours of its hours and nobody used the kiosk today' : 'after 2 hours without power outside the screen hours, untouched'}, it deep-sleeps and wakes at 7:00 AM ready for punches.</div>
+    <div class="btns">
+      <button class="primary" onclick="askSleep('${id}')">Plan holiday sleep</button>
+      ${t.sleep_until && new Date(t.sleep_until) > new Date() ? `<button onclick="cancelSleep('${id}')">Cancel plan</button>` : ''}
+    </div>
+    <div class="sub2">Power log <span class="mute">(last 7 days: ${esc(pw.cuts_7d || 0)} cuts, ${esc(mins(Math.round(pw.off_min_7d || 0)))} without power)</span></div>
+    ${table}`;
+}
+function sleepSet(device, from, until, okText) {
+  rpc('kiosk_app_sleep_set', { p_passcode: passcode, p_device: device, p_from: from, p_until: until })
+    .then(r => { if (r && r.error) show(r.error, 'err'); else { show(okText, 'ok'); load(); } })
+    .catch(e => show('Not saved: ' + e.message, 'err'));
+}
+function askSleep(device) {
+  const d = manilaToday();
+  const f = prompt('HOLIDAY SLEEP: when should the tablet go to deep sleep?\n(YYYY-MM-DD HH:MM, Manila time; it waits until nobody is using it)', d + ' 18:00');
+  if (f == null || !f.trim()) return;
+  const n = new Date(d + 'T00:00:00Z'); n.setUTCDate(n.getUTCDate() + 1);
+  const u = prompt('When should it WAKE UP, ready for punches?\n(YYYY-MM-DD HH:MM)', n.toISOString().slice(0, 10) + ' 07:00');
+  if (u == null || !u.trim()) return;
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(f.trim()) || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(u.trim())) { show('Dates must look like 2026-12-24 18:00.', 'err'); return; }
+  sleepSet(device, f.trim(), u.trim(), 'Holiday sleep planned: ' + f.trim() + ' to ' + u.trim() + '. The tablet gets it with its next report.');
+}
+function cancelSleep(device) {
+  if (!confirm('Cancel the holiday sleep plan? A tablet already sleeping for it wakes at its next report (within 12 hours) - or press its power button.')) return;
+  sleepSet(device, '', '', 'Holiday sleep plan cancelled.');
 }
 
 // owner 2026-11-18: battery life % (wear) and when to replace it
@@ -486,7 +560,7 @@ document.addEventListener('click', e => {
   if (d && d.dataset.k) setTimeout(() => { openDet[d.dataset.k] = d.open; }, 0);
 });
 const det = (k, title, body) => `<details data-k="${esc(k)}"${openDet[k] ? ' open' : ''}><summary>${title}</summary>${body}</details>`;
-const mins = m => m == null ? '-' : m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min';
+const mins = m => m == null ? '-' : m >= 60 ? Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '') : m + ' min';
 const dmy = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
 
 function punchesPart(t) {

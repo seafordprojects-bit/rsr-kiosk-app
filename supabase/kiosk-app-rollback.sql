@@ -22,6 +22,10 @@ drop function if exists public.kiosk_app_shot_put(text, text, text);
 drop function if exists public.kiosk_app_shot_get(text, text);
 drop table if exists public.kiosk_app_shots;
 -- build-7
+drop function if exists public.kiosk_app_sleep_set(text, text, text, text);
+drop function if exists public.kiosk_app_power_info(text);
+drop function if exists public.kiosk_app_power_put(text, jsonb);
+drop table if exists public.kiosk_app_power_log;
 drop function if exists public.kiosk_app_modem_set(text, text, jsonb);
 drop function if exists public.kiosk_app_modem_info(text);
 drop function if exists public.kiosk_app_modem_msg(text, text);
