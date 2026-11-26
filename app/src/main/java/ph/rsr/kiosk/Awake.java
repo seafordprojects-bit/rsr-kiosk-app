@@ -41,6 +41,12 @@ final class Awake {
     /** The app turns the real backlight down 15 s after the page is black: nobody sees a difference, and the
      *  screen light is the biggest battery user. The next touch brings it back. */
     static final long BACKLIGHT_LOW_AFTER_MS = PAGE_BLACK_AFTER_MS + 15_000L;
+    /** Screen brightness while awake (owner 2026-11-26). Kiosk tablet: FULL (1.0). At night in a dark yard the screen is
+     *  the only light on the worker's face, and Android's auto-brightness kept it so low that overtime Time Out photos
+     *  came out black on the new Carmen tablet (the old one ran Fully Kiosk at a fixed brightness). The kiosk page also
+     *  flashes white before a dark photo (kiosk v2026-11-26a). Roll-call phone: the phone's own setting (-1 =
+     *  WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE). Dark after 5 min (1 %) is unchanged. */
+    static float awakeBrightness(boolean phone) { return phone ? -1.0f : 1.0f; }
 
     synchronized void apply(boolean plugged, boolean maintenance) {
         boolean net = plugged || maintenance;

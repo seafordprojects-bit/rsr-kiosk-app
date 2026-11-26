@@ -198,6 +198,17 @@ public class AwakeTest {
         String act2 = Files.readString(Path.of("app/src/main/java/ph/rsr/kiosk/KioskActivity.java"));
         ok(act2.contains("Awake.BACKLIGHT_LOW_AFTER_MS") && !act2.contains("6 * 60_000L + 15_000L"), "KioskActivity uses Awake.BACKLIGHT_LOW_AFTER_MS (no old 6-minute copy)");
 
+        // 2026-11-26 (owner): overtime Time Out photos at night came out black on the new Carmen tablet. The screen is the
+        // only light on a face in a dark yard; Android's auto-brightness keeps it very low in the dark. While a kiosk
+        // tablet is awake (a touch, a wake) its screen is at FULL brightness; the dark-after-5-min saving is unchanged.
+        System.out.println("Awake brightness: full on kiosk tablets, the phone's own setting on the roll-call phone (owner 2026-11-26)");
+        ok(Awake.awakeBrightness(false) == 1.0f, "kiosk tablet awake: full brightness (lights the worker's face for the punch photo at night)");
+        ok(Awake.awakeBrightness(true) < 0f, "roll-call phone awake: the phone's own brightness setting (BRIGHTNESS_OVERRIDE_NONE)");
+        String sb = body(act2, "private void setBacklightLow(");
+        ok(sb.contains("Awake.awakeBrightness(prefs.phone())") && sb.contains("0.01f"), "setBacklightLow: dark = 1 %, awake = Awake.awakeBrightness (not Android's auto-brightness)");
+        String oc = body(act2, "protected void onCreate(");
+        ok(oc.contains("setBacklightLow(false)"), "the app starts at the awake brightness (the first punch after a restart is lit too)");
+
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
     }

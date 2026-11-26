@@ -89,6 +89,7 @@ public class KioskActivity extends Activity implements Core.Host {
         overlay.setBackgroundColor(0xEE0E2A47);
         overlay.setVisibility(View.GONE);
         setContentView(root);
+        setBacklightLow(false);   // start at the awake brightness: full on a kiosk tablet (night punch photos, 2026-11-26)
         buildWebView();
         root.addView(overlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -423,7 +424,7 @@ public class KioskActivity extends Activity implements Core.Host {
     private void setBacklightLow(boolean low) {
         backlightLow = low;
         WindowManager.LayoutParams lp = getWindow().getAttributes();
-        lp.screenBrightness = low ? 0.01f : WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        lp.screenBrightness = low ? 0.01f : Awake.awakeBrightness(prefs.phone());   // awake: full on a kiosk tablet (2026-11-26)
         getWindow().setAttributes(lp);
     }
 
