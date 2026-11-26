@@ -58,6 +58,9 @@ public class KioskActivity extends Activity implements Core.Host {
     private PermissionRequest pendingCamRequest;
     private long lastTouchAt = SystemClock.elapsedRealtime();
     private boolean backlightLow = false;
+    /** True once a touch has put the screen at the awake brightness (full on a kiosk tablet, 2026-11-26). An app start
+     *  never does it: a tablet restarted at night (crash, update) stays at its dim level until a hand touches it. */
+    private boolean awakeLit = false;
     /** The kiosk page blacks itself out after 5 min without a touch (2 min dim + 3 min, owner 2026-11-12). 15 s
      *  later the app turns the real backlight down too (Awake.BACKLIGHT_LOW_AFTER_MS). The next touch brings it back. */
     private static final long BACKLIGHT_LOW_AFTER_MS = Awake.BACKLIGHT_LOW_AFTER_MS;
@@ -89,7 +92,6 @@ public class KioskActivity extends Activity implements Core.Host {
         overlay.setBackgroundColor(0xEE0E2A47);
         overlay.setVisibility(View.GONE);
         setContentView(root);
-        setBacklightLow(false);   // start at the awake brightness: full on a kiosk tablet (night punch photos, 2026-11-26)
         buildWebView();
         root.addView(overlay, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -423,6 +425,7 @@ public class KioskActivity extends Activity implements Core.Host {
 
     private void setBacklightLow(boolean low) {
         backlightLow = low;
+        awakeLit = !low;
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.screenBrightness = low ? 0.01f : Awake.awakeBrightness(prefs.phone());   // awake: full on a kiosk tablet (2026-11-26)
         getWindow().setAttributes(lp);
@@ -658,7 +661,7 @@ public class KioskActivity extends Activity implements Core.Host {
     public boolean dispatchTouchEvent(MotionEvent ev) {
         Core.get(this).handTouched();   // a real hand: also wakes a holiday-sleeping kiosk
         lastTouchAt = SystemClock.elapsedRealtime();
-        if (backlightLow) setBacklightLow(false);
+        if (backlightLow || !awakeLit) setBacklightLow(false);   // a hand: full brightness (night punch photos)
         if (ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
             float zone = 90 * getResources().getDisplayMetrics().density;
             if (ev.getX() > root.getWidth() - zone && ev.getY() < zone) {

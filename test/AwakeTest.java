@@ -207,7 +207,10 @@ public class AwakeTest {
         String sb = body(act2, "private void setBacklightLow(");
         ok(sb.contains("Awake.awakeBrightness(prefs.phone())") && sb.contains("0.01f"), "setBacklightLow: dark = 1 %, awake = Awake.awakeBrightness (not Android's auto-brightness)");
         String oc = body(act2, "protected void onCreate(");
-        ok(oc.contains("setBacklightLow(false)"), "the app starts at the awake brightness (the first punch after a restart is lit too)");
+        ok(!oc.contains("setBacklightLow(false)"), "an app start (crash, update at night) does NOT light the screen: it stays dim until a hand touches it");
+        String dt = body(act2, "public boolean dispatchTouchEvent(");
+        ok(dt.contains("if (backlightLow || !awakeLit) setBacklightLow(false);"), "the first touch after a start (or after the dark) puts the screen at full brightness");
+        ok(sb.contains("awakeLit = !low;"), "setBacklightLow keeps awakeLit in step (dark = not lit)");
 
         System.out.println(fails == 0 ? "ALL " + passes + " PASSED" : fails + " FAILED, " + passes + " passed");
         if (fails > 0) System.exit(1);
